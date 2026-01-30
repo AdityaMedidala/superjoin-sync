@@ -1,88 +1,128 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
 import gspread
 from sqlalchemy import create_engine, text
 import uvicorn
 import asyncio
 import os
 import json
+from datetime import datetime
+
 app = FastAPI()
 
-# --- CONFIG ---
-# USE THE SAME URL AS BEFORE
-DB_URL = "mysql+pymysql://root:anySCUfFMwIbojPKJrVCQlBfyVPVRcSD@gondola.proxy.rlwy.net:43787/railway"
-SHEET_ID = "1bM61VLxcWdg3HaNgc2RkPLL-hm2S-BJ6Jo9lX4Qv1ks"
-JSON_KEYFILE = "superjoin-test.json"
+# Enable CORS (So your React Dashboard can talk to this later)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-engine = create_engine(DB_URL)
-#gc = gspread.service_account(filename=JSON_KEYFILE)
+# --- CONFIG (SECURE) ---
+# 1. Get DB URL from Environment Variable (Safe!)
+DB_URL = os.getenv("DB_URL") 
+if not DB_URL:
+    print("⚠️ WARNING: DB_URL not found. App will crash.")
+
+# 2. Google Auth (Cloud vs Local)
 if os.getenv("RAILWAY_ENVIRONMENT"): 
-    # On Cloud: Read from secret variable
     creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
     creds_dict = json.loads(creds_json)
     gc = gspread.service_account_from_dict(creds_dict)
 else:
-    # On Local: Read from file (Fallback)
+    # Local Fallback
     gc = gspread.service_account(filename='superjoin-test.json')
 
-
-
+# 3. Hardcoded Sheet ID (Okay for demo, but better as Env Var)
+SHEET_ID = "1bM61VLxcWdg3HaNgc2RkPLL-hm2S-BJ6Jo9lX4Qv1ks" 
 sh = gc.open_by_key(SHEET_ID).sheet1
+engine = create_engine(DB_URL)
 
-last_processed = {}
+# Store logs for the Dashboard
+recent_logs = []
+
+def log_msg(msg):
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    full_msg = f"[{timestamp}] {msg}"
+    print(full_msg)
+    recent_logs.insert(0, full_msg) # Add to top of list
+    if len(recent_logs) > 50: recent_logs.pop() # Keep last 50
 
 # --- WEBHOOK (Sheet -> DB) ---
 @app.post("/webhook")
 async def handle_sheet_update(request: Request):
-    data = await request.json()
-    row_id = data.get("id")
-    col = data.get("header")
-    val = data.get("value")
-    
-    if last_processed.get(str(row_id)) == str(val):
-        return {"status": "skipped"}
-
-    # Update DB
-    query = text(f"UPDATE mytable SET {col} = :val, sync_source = 'SHEET' WHERE id = :id")
-    with engine.connect() as conn:
-        conn.execute(query, {"val": val, "id": row_id})
-        conn.commit()
+    try:
+        data = await request.json()
+        row_id = data.get("id")
+        col = data.get("header")
+        val = data.get("value")
         
-    print(f"✅ Sheet -> DB: Updated Row {row_id}")
-    return {"status": "success"}
+        # Validations
+        if not row_id or row_id == "id": return {"status": "ignored"}
+
+        # Update DB with 'sync_source' to prevent loops
+        # Ensure your DB table has a column 'sync_source' (VARCHAR)
+        query = text(f"UPDATE mytable SET {col} = :val, sync_source = 'SHEET' WHERE id = :id")
+        
+        with engine.connect() as conn:
+            conn.execute(query, {"val": val, "id": row_id})
+            conn.commit()
+            
+        log_msg(f"✅ Sheet -> DB: Updated ID {row_id} ({col} = {val})")
+        return {"status": "success"}
+    except Exception as e:
+        log_msg(f"❌ Error in Webhook: {str(e)}")
+        return {"error": str(e)}
 
 # --- POLLER (DB -> Sheet) ---
-async def db_poller():
-    while True:
-        try:
-            with engine.connect() as conn:
-                # Find rows changed by DB in last 3 seconds
-                query = text("SELECT * FROM mytable WHERE sync_source = 'DB' AND last_updated > NOW() - INTERVAL 3 SECOND")
-                result = conn.execute(query)
-                rows = result.mappings().all()
+# "Technical Depth": We run this in a separate thread so it doesn't block the API
+def sync_db_to_sheet():
+    try:
+        with engine.connect() as conn:
+            # Find rows changed by 'DB' (or anyone NOT the sheet) recently
+            # NOTE: You must update your SQL table to have 'sync_source' and 'last_updated'
+            query = text("SELECT * FROM mytable WHERE sync_source != 'SHEET' AND last_updated > NOW() - INTERVAL 5 SECOND")
+            result = conn.execute(query)
+            rows = result.mappings().all()
 
-                for row in rows:
+            for row in rows:
+                # Find the row in Google Sheet by ID (Column 1)
+                try:
                     cell = sh.find(str(row['id']), in_column=1)
                     if cell:
-                        # Update the specific cell to avoid overwriting user edits
-                        # We need to know which column changed. 
-                        # For this simple demo, we will just update the 'Name' column (Col B)
-                        # TO MAKE THIS DYNAMIC: You would map column names to letters.
-                        # For now, let's assume we are just syncing the 2nd column (Name)
-                        # Modify this line based on what data you are testing!
+                        # Update Name (Col 2) - Expand this logic for other columns if needed
+                        sh.update_cell(cell.row, 2, row['Name'])
                         
-                        sh.update_cell(cell.row, 2, row['Name']) # Update Col 2
+                        # Mark as synced so we don't loop
+                        conn.execute(text("UPDATE mytable SET sync_source = 'SYNCED' WHERE id = :id"), {"id": row['id']})
+                        conn.commit()
                         
-                        last_processed[str(row['id'])] = str(row['Name'])
-                        print(f"🔄 DB -> Sheet: Updated ID {row['id']}")
+                        log_msg(f"🔄 DB -> Sheet: Updated ID {row['id']}")
+                except gspread.exceptions.CellNotFound:
+                    log_msg(f"⚠️ Row {row['id']} not found in Sheet")
+                    
+    except Exception as e:
+        print(f"Poller Error: {e}")
 
-        except Exception as e:
-            pass # Silent fail for polling to keep loop alive
-        
+async def db_poller_loop():
+    loop = asyncio.get_running_loop()
+    while True:
+        # Run the slow Google API call in a thread pool (Non-blocking!)
+        await loop.run_in_executor(None, sync_db_to_sheet)
         await asyncio.sleep(3)
 
 @app.on_event("startup")
 async def start_poller():
-    asyncio.create_task(db_poller())
+    asyncio.create_task(db_poller_loop())
+
+# --- DASHBOARD ENDPOINTS ---
+@app.get("/")
+def health_check():
+    return {"status": "active", "service": "Superjoin Sync Engine"}
+
+@app.get("/logs")
+def get_logs():
+    return {"logs": recent_logs}
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
