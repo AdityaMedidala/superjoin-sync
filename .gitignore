@@ -1,0 +1,11 @@
+# Ignore the virtual environment (thousands of junk files)
+.venv/
+venv/
+__pycache__/
+
+# Ignore sensitive secrets (NEVER upload these)
+*.json
+.env
+
+# Ignore system files
+.DS_Store
