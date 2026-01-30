@@ -193,87 +193,89 @@ async def worker_sheet_to_db():
             await asyncio.sleep(2)
 
 
-# ---------------- WORKER: DB → SHEET ---------------- #
-# ---------------- WORKER: DB → SHEET (OPTIMIZED) ---------------- #
+# ---------------- WORKER: DB → SHEET (SAFE MODE) ---------------- #
 
 async def worker_db_to_sheet():
-    log("🔵 Worker started: DB → Sheet")
-
-    # Cache headers ONCE before the loop starts to save API calls
-    headers = None
-    try:
-        headers = await get_headers()
-    except Exception as e:
-        log(f"⚠️ Could not fetch headers on startup: {e}")
+    log("🔵 Worker started: DB → Sheet (SAFE MODE)")
+    
+    # Initial pause to let startup settle
+    await asyncio.sleep(5)
 
     while True:
         try:
-            # If we failed to get headers earlier, try again now
-            if not headers:
+            # 1. Fetch headers (Cached if possible to save reads)
+            try:
+                sheet = await get_sheet_safe()
                 headers = await get_headers()
+            except Exception as e:
+                log(f"⚠️ Header fetch failed: {e}")
+                await asyncio.sleep(60) # Long sleep on API failure
+                continue
 
-            # 1. Fetch rows from DB (Cheap operation)
             cols = ", ".join(f"`{h}`" for h in headers)
-            
+
+            # 2. Get rows that need syncing
             with engine.begin() as conn:
                 rows = conn.execute(text(f"""
                     SELECT {cols}
                     FROM mytable
                     WHERE sync_source IN ('DB','SHEET')
                     ORDER BY last_updated
-                    LIMIT 10
+                    LIMIT 5 
                 """)).mappings().all()
 
-                if not rows:
-                    # Sleep longer if no work to do (10s instead of 5s)
-                    await asyncio.sleep(10)
-                    continue
+            if not rows:
+                await asyncio.sleep(10) # No work? Sleep 10s
+                continue
 
-                # 2. Only connect to Sheet if we have data to write
-                sheet = await get_sheet_safe()
+            # 3. Process rows ONE BY ONE with delays
+            for row in rows:
+                row_id = row["id"]
+                try:
+                    # Find cell
+                    cell = sheet.find(str(row_id), in_column=1)
+                    
+                    # *** CRITICAL: SLEEP AFTER READ ***
+                    await asyncio.sleep(2) 
 
-                for row in rows:
-                    row_id = row["id"]
-                    try:
-                        # API CALL: Find the cell
-                        cell = sheet.find(str(row_id), in_column=1)
+                    if not cell:
+                        continue
 
-                        if not cell:
-                            continue
+                    updates = []
+                    for i, h in enumerate(headers, start=1):
+                        if h in row:
+                            updates.append({
+                                "range": f"{chr(64+i)}{cell.row}",
+                                "values": [[row[h]]]
+                            })
 
-                        updates = []
-                        for i, h in enumerate(headers, start=1):
-                            if h in row:
-                                updates.append({
-                                    "range": f"{chr(64+i)}{cell.row}",
-                                    "values": [[row[h]]]
-                                })
+                    if updates:
+                        sheet.batch_update(updates)
+                        
+                        # *** CRITICAL: SLEEP AFTER WRITE ***
+                        await asyncio.sleep(2)
 
-                        if updates:
-                            # API CALL: Batch update
-                            sheet.batch_update(updates)
-
+                        # Mark as synced in DB
+                        with engine.begin() as conn:
                             conn.execute(text("""
                                 UPDATE mytable
                                 SET sync_source = 'SYNCED'
                                 WHERE id = :id
                             """), {"id": row_id})
 
-                            log(f"✅ DB→Sheet: {row_id}")
+                        log(f"✅ DB→Sheet: {row_id}")
 
-                        # Sleep briefly between rows to pace API calls
-                        await asyncio.sleep(1) 
-
-                    except Exception as e:
-                        log(f"⚠️ Sheet update error {row_id}: {e}")
+                except Exception as e:
+                    if "429" in str(e):
+                        log(f"⏳ Quota Hit! Sleeping 60s...")
+                        await asyncio.sleep(60)
+                    else:
+                        log(f"⚠️ Error {row_id}: {e}")
 
         except Exception as e:
-            log(f"❌ DB→Sheet error: {e}")
-            # If we hit an error (like 429), sleep significantly longer
+            log(f"❌ Worker Error: {e}")
             await asyncio.sleep(30)
-
-        # Standard poll interval increased to 15s to respect quotas
-        await asyncio.sleep(15)
+            
 # ---------------- FASTAPI LIFESPAN ---------------- #
 
 @asynccontextmanager
