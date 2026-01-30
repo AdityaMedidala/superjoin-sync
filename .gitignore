@@ -4,8 +4,7 @@
 __pycache__/
 *.pyc
 .env
-*.json
-
+superjoin-test.json
 
 # Node / Next.js
 node_modules/
