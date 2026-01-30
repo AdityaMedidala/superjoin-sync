@@ -28,23 +28,6 @@ if not DB_URL:
     raise RuntimeError("❌ MYSQL_URL not set")
 
 
-# ---------------- GOOGLE SHEETS ---------------- #
-
-def get_sheet():
-
-    if os.getenv("RAILWAY_ENVIRONMENT"):
-        creds = json.loads(os.getenv("GOOGLE_CREDENTIALS_JSON"))
-        gc = gspread.service_account_from_dict(creds)
-
-    else:
-        gc = gspread.service_account("superjoin-test.json")
-
-    return gc.open_by_key(SHEET_ID).sheet1
-
-
-sh = get_sheet()
-
-
 # ---------------- DATABASE ---------------- #
 
 engine = create_engine(DB_URL)
@@ -73,10 +56,73 @@ def log(msg):
         logs.pop()
 
 
+# ---------------- GOOGLE SHEETS ---------------- #
+
+def _create_sheet():
+
+    if os.getenv("RAILWAY_ENVIRONMENT"):
+        creds = json.loads(os.getenv("GOOGLE_CREDENTIALS_JSON"))
+        gc = gspread.service_account_from_dict(creds)
+
+    else:
+        gc = gspread.service_account("superjoin-test.json")
+
+    return gc.open_by_key(SHEET_ID).sheet1
+
+
+_sheet = None
+_sheet_lock = asyncio.Lock()
+
+
+async def get_sheet_safe():
+
+    global _sheet
+
+    if _sheet:
+        return _sheet
+
+    async with _sheet_lock:
+
+        if _sheet:
+            return _sheet
+
+        delay = 5
+
+        for i in range(5):
+
+            try:
+
+                sh = _create_sheet()
+
+                _sheet = sh
+
+                log("✅ Connected to Google Sheets")
+
+                return sh
+
+            except Exception as e:
+
+                if "429" in str(e):
+
+                    log(f"⏳ Sheet quota hit, retry in {delay}s...")
+
+                    await asyncio.sleep(delay)
+
+                    delay *= 2
+
+                else:
+                    raise
+
+        raise RuntimeError("❌ Could not connect to Google Sheets")
+
+
 # ---------------- HELPERS ---------------- #
 
-def get_headers():
-    return sh.row_values(1)
+async def get_headers():
+
+    sheet = await get_sheet_safe()
+
+    return sheet.row_values(1)
 
 
 # ---------------- WORKER: SHEET → DB ---------------- #
@@ -95,7 +141,7 @@ async def worker_sheet_to_db():
             )
 
             if not item:
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.5)
                 continue
 
             data = json.loads(item[1])
@@ -143,7 +189,8 @@ async def worker_sheet_to_db():
         except Exception as e:
 
             log(f"❌ Sheet→DB error: {e}")
-            await asyncio.sleep(1)
+
+            await asyncio.sleep(2)
 
 
 # ---------------- WORKER: DB → SHEET ---------------- #
@@ -156,7 +203,9 @@ async def worker_db_to_sheet():
 
         try:
 
-            headers = get_headers()
+            sheet = await get_sheet_safe()
+
+            headers = await get_headers()
 
             cols = ", ".join(f"`{h}`" for h in headers)
 
@@ -168,12 +217,12 @@ async def worker_db_to_sheet():
                     FROM mytable
                     WHERE sync_source IN ('DB','SHEET')
                     ORDER BY last_updated
-                    LIMIT 20
+                    LIMIT 10
                 """)).mappings().all()
 
 
                 if not rows:
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(5)
                     continue
 
 
@@ -182,7 +231,8 @@ async def worker_db_to_sheet():
                     row_id = row["id"]
 
                     try:
-                        cell = sh.find(str(row_id), in_column=1)
+
+                        cell = sheet.find(str(row_id), in_column=1)
 
                         if not cell:
                             continue
@@ -202,7 +252,7 @@ async def worker_db_to_sheet():
 
                         if updates:
 
-                            sh.batch_update(updates)
+                            sheet.batch_update(updates)
 
 
                             conn.execute(text("""
@@ -216,10 +266,8 @@ async def worker_db_to_sheet():
 
 
                     except Exception as e:
-                        if "CellNotFound" in str(e):
-                            log(f"⚠️ Row {row_id} missing in Sheet")
-                        else:
-                            raise
+
+                        log(f"⚠️ Sheet update error {row_id}: {e}")
 
 
         except Exception as e:
@@ -227,7 +275,7 @@ async def worker_db_to_sheet():
             log(f"❌ DB→Sheet error: {e}")
 
 
-        await asyncio.sleep(1)
+        await asyncio.sleep(5)
 
 
 # ---------------- FASTAPI LIFESPAN ---------------- #
