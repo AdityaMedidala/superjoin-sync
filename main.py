@@ -1,16 +1,255 @@
-from fastapi import FastAPI, Request, BackgroundTasks
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-import gspread
-from sqlalchemy import create_engine, text
-import uvicorn
+from contextlib import asynccontextmanager
+
 import asyncio
-import os
+import gspread
 import json
+import os
+import redis.asyncio as redis
+
 from datetime import datetime
+from sqlalchemy import create_engine, text
+from dotenv import load_dotenv
 
-app = FastAPI()
+load_dotenv()
 
-# Enable CORS (So your React Dashboard can talk to this later)
+
+# ---------------- CONFIG ---------------- #
+
+DB_URL = os.getenv("MYSQL_URL")
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+SHEET_ID = os.getenv(
+    "SHEET_ID",
+    "1bM61VLxcWdg3HaNgc2RkPLL-hm2S-BJ6Jo9lX4Qv1ks"
+)
+
+if not DB_URL:
+    raise RuntimeError("❌ MYSQL_URL not set")
+
+
+# ---------------- GOOGLE SHEETS ---------------- #
+
+def get_sheet():
+
+    if os.getenv("RAILWAY_ENVIRONMENT"):
+        creds = json.loads(os.getenv("GOOGLE_CREDENTIALS_JSON"))
+        gc = gspread.service_account_from_dict(creds)
+
+    else:
+        gc = gspread.service_account("superjoin-test.json")
+
+    return gc.open_by_key(SHEET_ID).sheet1
+
+
+sh = get_sheet()
+
+
+# ---------------- DATABASE ---------------- #
+
+engine = create_engine(DB_URL)
+
+
+# ---------------- REDIS ---------------- #
+
+redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+
+
+# ---------------- LOGGING ---------------- #
+
+logs = []
+
+
+def log(msg):
+
+    ts = datetime.now().strftime("%H:%M:%S")
+    msg = f"[{ts}] {msg}"
+
+    print(msg)
+
+    logs.insert(0, msg)
+
+    if len(logs) > 50:
+        logs.pop()
+
+
+# ---------------- HELPERS ---------------- #
+
+def get_headers():
+    return sh.row_values(1)
+
+
+# ---------------- WORKER: SHEET → DB ---------------- #
+
+async def worker_sheet_to_db():
+
+    log("🔵 Worker started: Sheet → DB")
+
+    while True:
+
+        try:
+
+            item = await redis_client.blpop(
+                "queue:sheet_to_db",
+                timeout=1
+            )
+
+            if not item:
+                await asyncio.sleep(0.2)
+                continue
+
+            data = json.loads(item[1])
+
+            row_id = data.get("id")
+            col = data.get("header")
+            val = data.get("value")
+
+            if not row_id or col == "id":
+                continue
+
+
+            with engine.begin() as conn:
+
+                current = conn.execute(
+                    text(f"""
+                        SELECT `{col}`
+                        FROM mytable
+                        WHERE id = :id
+                    """),
+                    {"id": row_id}
+                ).scalar()
+
+
+                if str(current) == str(val):
+                    log(f"⏭️ Skip duplicate {row_id}")
+                    continue
+
+
+                conn.execute(
+                    text(f"""
+                        UPDATE mytable
+                        SET `{col}` = :val,
+                            sync_source = 'SHEET',
+                            last_updated = NOW()
+                        WHERE id = :id
+                    """),
+                    {"val": val, "id": row_id}
+                )
+
+
+                log(f"✅ Sheet→DB: {row_id} {col}={val}")
+
+
+        except Exception as e:
+
+            log(f"❌ Sheet→DB error: {e}")
+            await asyncio.sleep(1)
+
+
+# ---------------- WORKER: DB → SHEET ---------------- #
+
+async def worker_db_to_sheet():
+
+    log("🔵 Worker started: DB → Sheet")
+
+    while True:
+
+        try:
+
+            headers = get_headers()
+
+            cols = ", ".join(f"`{h}`" for h in headers)
+
+
+            with engine.begin() as conn:
+
+                rows = conn.execute(text(f"""
+                    SELECT {cols}
+                    FROM mytable
+                    WHERE sync_source IN ('DB','SHEET')
+                    ORDER BY last_updated
+                    LIMIT 20
+                """)).mappings().all()
+
+
+                if not rows:
+                    await asyncio.sleep(1)
+                    continue
+
+
+                for row in rows:
+
+                    row_id = row["id"]
+
+                    try:
+                        cell = sh.find(str(row_id), in_column=1)
+
+                        if not cell:
+                            continue
+
+
+                        updates = []
+
+                        for i, h in enumerate(headers, start=1):
+
+                            if h in row:
+
+                                updates.append({
+                                    "range": f"{chr(64+i)}{cell.row}",
+                                    "values": [[row[h]]]
+                                })
+
+
+                        if updates:
+
+                            sh.batch_update(updates)
+
+
+                            conn.execute(text("""
+                                UPDATE mytable
+                                SET sync_source = 'SYNCED'
+                                WHERE id = :id
+                            """), {"id": row_id})
+
+
+                            log(f"✅ DB→Sheet: {row_id}")
+
+
+                    except Exception as e:
+                        if "CellNotFound" in str(e):
+                            log(f"⚠️ Row {row_id} missing in Sheet")
+                        else:
+                            raise
+
+
+        except Exception as e:
+
+            log(f"❌ DB→Sheet error: {e}")
+
+
+        await asyncio.sleep(1)
+
+
+# ---------------- FASTAPI LIFESPAN ---------------- #
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+
+    log("🚀 Superjoin Sync Started")
+
+    asyncio.create_task(worker_sheet_to_db())
+    asyncio.create_task(worker_db_to_sheet())
+
+    yield
+
+    log("🛑 Shutting down")
+
+
+# ---------------- APP ---------------- #
+
+app = FastAPI(lifespan=lifespan)
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,111 +257,58 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- CONFIG (SECURE) ---
-# 1. Get DB URL from Environment Variable (Safe!)
-DB_URL = os.getenv("DB_URL") 
-if not DB_URL:
-    print("⚠️ WARNING: DB_URL not found. App will crash.")
 
-# 2. Google Auth (Cloud vs Local)
-if os.getenv("RAILWAY_ENVIRONMENT"): 
-    creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
-    creds_dict = json.loads(creds_json)
-    gc = gspread.service_account_from_dict(creds_dict)
-else:
-    # Local Fallback
-    gc = gspread.service_account(filename='superjoin-test.json')
+# ---------------- ROUTES ---------------- #
 
-# 3. Hardcoded Sheet ID (Okay for demo, but better as Env Var)
-SHEET_ID = "1bM61VLxcWdg3HaNgc2RkPLL-hm2S-BJ6Jo9lX4Qv1ks" 
-sh = gc.open_by_key(SHEET_ID).sheet1
-engine = create_engine(DB_URL)
-
-# Store logs for the Dashboard
-recent_logs = []
-
-def log_msg(msg):
-    timestamp = datetime.now().strftime("%H:%M:%S")
-    full_msg = f"[{timestamp}] {msg}"
-    print(full_msg)
-    recent_logs.insert(0, full_msg) # Add to top of list
-    if len(recent_logs) > 50: recent_logs.pop() # Keep last 50
-
-# --- WEBHOOK (Sheet -> DB) ---
 @app.post("/webhook")
-async def handle_sheet_update(request: Request):
-    try:
-        data = await request.json()
-        row_id = data.get("id")
-        col = data.get("header")
-        val = data.get("value")
-        
-        # Validations
-        if not row_id or row_id == "id": return {"status": "ignored"}
+async def webhook(request: Request):
 
-        # Update DB with 'sync_source' to prevent loops
-        # Ensure your DB table has a column 'sync_source' (VARCHAR)
-        query = text(f"UPDATE mytable SET {col} = :val, sync_source = 'SHEET' WHERE id = :id")
-        
-        with engine.connect() as conn:
-            conn.execute(query, {"val": val, "id": row_id})
-            conn.commit()
-            
-        log_msg(f"✅ Sheet -> DB: Updated ID {row_id} ({col} = {val})")
-        return {"status": "success"}
-    except Exception as e:
-        log_msg(f"❌ Error in Webhook: {str(e)}")
-        return {"error": str(e)}
+    data = await request.json()
 
-# --- POLLER (DB -> Sheet) ---
-# "Technical Depth": We run this in a separate thread so it doesn't block the API
-def sync_db_to_sheet():
-    try:
-        with engine.connect() as conn:
-            # Find rows changed by 'DB' (or anyone NOT the sheet) recently
-            # NOTE: You must update your SQL table to have 'sync_source' and 'last_updated'
-            query = text("SELECT * FROM mytable WHERE sync_source != 'SHEET' AND last_updated > NOW() - INTERVAL 5 SECOND")
-            result = conn.execute(query)
-            rows = result.mappings().all()
+    await redis_client.rpush(
+        "queue:sheet_to_db",
+        json.dumps(data)
+    )
 
-            for row in rows:
-                # Find the row in Google Sheet by ID (Column 1)
-                try:
-                    cell = sh.find(str(row['id']), in_column=1)
-                    if cell:
-                        # Update Name (Col 2) - Expand this logic for other columns if needed
-                        sh.update_cell(cell.row, 2, row['Name'])
-                        
-                        # Mark as synced so we don't loop
-                        conn.execute(text("UPDATE mytable SET sync_source = 'SYNCED' WHERE id = :id"), {"id": row['id']})
-                        conn.commit()
-                        
-                        log_msg(f"🔄 DB -> Sheet: Updated ID {row['id']}")
-                except gspread.exceptions.CellNotFound:
-                    log_msg(f"⚠️ Row {row['id']} not found in Sheet")
-                    
-    except Exception as e:
-        print(f"Poller Error: {e}")
+    size = await redis_client.llen("queue:sheet_to_db")
 
-async def db_poller_loop():
-    loop = asyncio.get_running_loop()
-    while True:
-        # Run the slow Google API call in a thread pool (Non-blocking!)
-        await loop.run_in_executor(None, sync_db_to_sheet)
-        await asyncio.sleep(3)
+    log(f"📥 Queued {data.get('id')} ({size})")
 
-@app.on_event("startup")
-async def start_poller():
-    asyncio.create_task(db_poller_loop())
+    return {"status": "ok", "queue": size}
 
-# --- DASHBOARD ENDPOINTS ---
+
 @app.get("/")
-def health_check():
-    return {"status": "active", "service": "Superjoin Sync Engine"}
+def home():
+
+    return {
+        "status": "running",
+        "service": "Superjoin Sync (2-Way)"
+    }
+
 
 @app.get("/logs")
 def get_logs():
-    return {"logs": recent_logs}
+
+    return {"logs": logs}
+
+
+@app.get("/stats")
+async def stats():
+
+    return {
+        "queue": await redis_client.llen("queue:sheet_to_db"),
+        "logs": len(logs)
+    }
+
+
+# ---------------- MAIN ---------------- #
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+
+    import uvicorn
+
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", 8000))
+    )

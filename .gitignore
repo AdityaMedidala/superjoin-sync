@@ -1,11 +1,21 @@
-# Ignore the virtual environment (thousands of junk files)
+
+# Python
 .venv/
-venv/
 __pycache__/
-
-# Ignore sensitive secrets (NEVER upload these)
-*.json
+*.pyc
 .env
+*.json
 
-# Ignore system files
+
+# Node / Next.js
+node_modules/
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# Logs
+*.log
+
+# OS
 .DS_Store
+Thumbs.db
