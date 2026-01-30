@@ -194,24 +194,28 @@ async def worker_sheet_to_db():
 
 
 # ---------------- WORKER: DB → SHEET ---------------- #
+# ---------------- WORKER: DB → SHEET (OPTIMIZED) ---------------- #
 
 async def worker_db_to_sheet():
-
     log("🔵 Worker started: DB → Sheet")
 
+    # Cache headers ONCE before the loop starts to save API calls
+    headers = None
+    try:
+        headers = await get_headers()
+    except Exception as e:
+        log(f"⚠️ Could not fetch headers on startup: {e}")
+
     while True:
-
         try:
+            # If we failed to get headers earlier, try again now
+            if not headers:
+                headers = await get_headers()
 
-            sheet = await get_sheet_safe()
-
-            headers = await get_headers()
-
+            # 1. Fetch rows from DB (Cheap operation)
             cols = ", ".join(f"`{h}`" for h in headers)
-
-
+            
             with engine.begin() as conn:
-
                 rows = conn.execute(text(f"""
                     SELECT {cols}
                     FROM mytable
@@ -220,40 +224,34 @@ async def worker_db_to_sheet():
                     LIMIT 10
                 """)).mappings().all()
 
-
                 if not rows:
-                    await asyncio.sleep(5)
+                    # Sleep longer if no work to do (10s instead of 5s)
+                    await asyncio.sleep(10)
                     continue
 
+                # 2. Only connect to Sheet if we have data to write
+                sheet = await get_sheet_safe()
 
                 for row in rows:
-
                     row_id = row["id"]
-
                     try:
-
+                        # API CALL: Find the cell
                         cell = sheet.find(str(row_id), in_column=1)
 
                         if not cell:
                             continue
 
-
                         updates = []
-
                         for i, h in enumerate(headers, start=1):
-
                             if h in row:
-
                                 updates.append({
                                     "range": f"{chr(64+i)}{cell.row}",
                                     "values": [[row[h]]]
                                 })
 
-
                         if updates:
-
+                            # API CALL: Batch update
                             sheet.batch_update(updates)
-
 
                             conn.execute(text("""
                                 UPDATE mytable
@@ -261,23 +259,21 @@ async def worker_db_to_sheet():
                                 WHERE id = :id
                             """), {"id": row_id})
 
-
                             log(f"✅ DB→Sheet: {row_id}")
 
+                        # Sleep briefly between rows to pace API calls
+                        await asyncio.sleep(1) 
 
                     except Exception as e:
-
                         log(f"⚠️ Sheet update error {row_id}: {e}")
 
-
         except Exception as e:
-
             log(f"❌ DB→Sheet error: {e}")
+            # If we hit an error (like 429), sleep significantly longer
+            await asyncio.sleep(30)
 
-
-        await asyncio.sleep(5)
-
-
+        # Standard poll interval increased to 15s to respect quotas
+        await asyncio.sleep(15)
 # ---------------- FASTAPI LIFESPAN ---------------- #
 
 @asynccontextmanager
