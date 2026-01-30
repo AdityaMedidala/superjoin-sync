@@ -194,88 +194,99 @@ async def worker_sheet_to_db():
 
 
 # ---------------- WORKER: DB → SHEET (SAFE MODE) ---------------- #
+# ---------------- WORKER: DB → SHEET (SMART SYNC) ---------------- #
 
 async def worker_db_to_sheet():
-    log("🔵 Worker started: DB → Sheet (SAFE MODE)")
-    
-    # Initial pause to let startup settle
+    log("🔵 Worker started: DB → Sheet (SMART SYNC)")
     await asyncio.sleep(5)
 
     while True:
         try:
-            # 1. Fetch headers (Cached if possible to save reads)
+            # 1. Fetch headers
             try:
                 sheet = await get_sheet_safe()
                 headers = await get_headers()
             except Exception as e:
                 log(f"⚠️ Header fetch failed: {e}")
-                await asyncio.sleep(60) # Long sleep on API failure
+                await asyncio.sleep(60)
                 continue
 
             cols = ", ".join(f"`{h}`" for h in headers)
 
-            # 2. Get rows that need syncing
+            # 2. Get unsynced rows
             with engine.begin() as conn:
                 rows = conn.execute(text(f"""
                     SELECT {cols}
                     FROM mytable
                     WHERE sync_source IN ('DB','SHEET')
-                    ORDER BY last_updated
+                    ORDER BY last_updated ASC
                     LIMIT 5 
                 """)).mappings().all()
 
             if not rows:
-                await asyncio.sleep(10) # No work? Sleep 10s
+                await asyncio.sleep(10)
                 continue
 
-            # 3. Process rows ONE BY ONE with delays
+            # 3. Process rows
             for row in rows:
                 row_id = row["id"]
                 try:
-                    # Find cell
+                    # Check if ID exists in Sheet
                     cell = sheet.find(str(row_id), in_column=1)
-                    
-                    # *** CRITICAL: SLEEP AFTER READ ***
-                    await asyncio.sleep(2) 
+                    await asyncio.sleep(1.5) # Read Quota Safety
 
-                    if not cell:
-                        continue
-
-                    updates = []
-                    for i, h in enumerate(headers, start=1):
-                        if h in row:
-                            updates.append({
-                                "range": f"{chr(64+i)}{cell.row}",
-                                "values": [[row[h]]]
-                            })
-
-                    if updates:
-                        sheet.batch_update(updates)
+                    if cell:
+                        # --- UPDATE EXISTING ROW ---
+                        updates = []
+                        for i, h in enumerate(headers, start=1):
+                            # Only update if value differs (optional optimization) or just overwrite
+                            if h in row:
+                                val = row[h]
+                                # Convert None to empty string
+                                if val is None: val = "" 
+                                updates.append({
+                                    "range": f"{chr(64+i)}{cell.row}",
+                                    "values": [[str(val)]]
+                                })
                         
-                        # *** CRITICAL: SLEEP AFTER WRITE ***
-                        await asyncio.sleep(2)
+                        if updates:
+                            sheet.batch_update(updates)
+                            log(f"✅ DB→Sheet (Updated): {row_id}")
 
-                        # Mark as synced in DB
-                        with engine.begin() as conn:
-                            conn.execute(text("""
-                                UPDATE mytable
-                                SET sync_source = 'SYNCED'
-                                WHERE id = :id
-                            """), {"id": row_id})
+                    else:
+                        # --- CREATE NEW ROW (The Fix) ---
+                        # Map DB columns to Sheet headers order
+                        new_values = []
+                        for h in headers:
+                            val = row.get(h, "")
+                            if val is None: val = ""
+                            new_values.append(str(val))
+                        
+                        sheet.append_row(new_values)
+                        log(f"✅ DB→Sheet (Created): {row_id}")
 
-                        log(f"✅ DB→Sheet: {row_id}")
+                    # Write Quota Safety
+                    await asyncio.sleep(1.5)
+
+                    # 4. Mark as SYNCED in DB
+                    with engine.begin() as conn:
+                        conn.execute(text("""
+                            UPDATE mytable
+                            SET sync_source = 'SYNCED'
+                            WHERE id = :id
+                        """), {"id": row_id})
 
                 except Exception as e:
                     if "429" in str(e):
                         log(f"⏳ Quota Hit! Sleeping 60s...")
                         await asyncio.sleep(60)
                     else:
-                        log(f"⚠️ Error {row_id}: {e}")
+                        log(f"⚠️ Error processing {row_id}: {e}")
 
         except Exception as e:
             log(f"❌ Worker Error: {e}")
             await asyncio.sleep(30)
-            
+
 # ---------------- FASTAPI LIFESPAN ---------------- #
 
 @asynccontextmanager
