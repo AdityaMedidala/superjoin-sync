@@ -4,7 +4,7 @@ from sqlalchemy import create_engine, text
 import uvicorn
 import asyncio
 import os
-
+import json
 app = FastAPI()
 
 # --- CONFIG ---
@@ -14,7 +14,18 @@ SHEET_ID = "1bM61VLxcWdg3HaNgc2RkPLL-hm2S-BJ6Jo9lX4Qv1ks"
 JSON_KEYFILE = "superjoin-test.json"
 
 engine = create_engine(DB_URL)
-gc = gspread.service_account(filename=JSON_KEYFILE)
+#gc = gspread.service_account(filename=JSON_KEYFILE)
+if os.getenv("RAILWAY_ENVIRONMENT"): 
+    # On Cloud: Read from secret variable
+    creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
+    creds_dict = json.loads(creds_json)
+    gc = gspread.service_account_from_dict(creds_dict)
+else:
+    # On Local: Read from file (Fallback)
+    gc = gspread.service_account(filename='superjoin-test.json')
+
+
+
 sh = gc.open_by_key(SHEET_ID).sheet1
 
 last_processed = {}
