@@ -1,4 +1,4 @@
-const BACKEND_URL = 'https://web-production-645c3.up.railway.app/webhook';  // ← Update this!
+const BACKEND_URL = 'https://web-production-645c3.up.railway.app'; 
 
 function setup() {
   ScriptApp.getProjectTriggers().forEach(t => {
@@ -7,7 +7,6 @@ function setup() {
     }
   });
   
-  // Install new trigger
   ScriptApp.newTrigger('onEditTrigger')
     .forSpreadsheet(SpreadsheetApp.getActive())
     .onEdit()
@@ -17,7 +16,6 @@ function setup() {
 }
 
 function onEditTrigger(e) {
-  // Quick exit if not a valid
   if (!e || !e.range) return;
   
   const range = e.range;
@@ -25,53 +23,40 @@ function onEditTrigger(e) {
   const row = range.getRow();
   const col = range.getColumn();
   
-  // Ignore multi-cell pastes
+  // Ignore header edits and bulk pastes
   if (row === 1 || range.getNumRows() > 1) return;
   
-  // 🔒 Multiplayer Safety: Prevent race conditions
+  // 🔒 Multiplayer Safety: Google Script Locking
   const lock = LockService.getScriptLock();
   try {
-    lock.waitLock(2000);  // Wait up to 2s if someone else is editing
+    lock.waitLock(2000); 
   } catch (err) {
-    Logger.log('Busy - skipping');
-    return;
+    return; // System busy, skip to avoid lag
   }
   
   try {
-    // Get data
     const id = sheet.getRange(row, 1).getValue();
-    const header = sheet.getRange(1, col).getValue();
+    const header = sheet.getRange(1, col).getValue(); // Get column title
     const value = e.value || '';
     
-    // Skip invalid
     if (!id || id === 'id') return;
     
-    // webhook
     const payload = {
       id: String(id),
-      header: String(header),
+      header: String(header), // e.g. "Email"
       value: String(value)
     };
     
-    const options = {
+    UrlFetchApp.fetch(`${BACKEND_URL}/webhook`, {
       method: 'post',
       contentType: 'application/json',
       payload: JSON.stringify(payload),
-      muteHttpExceptions: true  // Don't show errors to user
-    };
-    
-    UrlFetchApp.fetch(`${BACKEND_URL}/webhook`, options);
+      muteHttpExceptions: true
+    });
     
   } catch (err) {
-    Logger.log('Error: ' + err);
+    Logger.log('Sync Error: ' + err);
   } finally {
-    lock.releaseLock();  // Always release lock
+    lock.releaseLock(); 
   }
-}
-
-// Test function
-function test() {
-  const res = UrlFetchApp.fetch(`${BACKEND_URL}/`);
-  Logger.log(res.getContentText());
-  SpreadsheetApp.getUi().alert('Backend is reachable!');
 }
