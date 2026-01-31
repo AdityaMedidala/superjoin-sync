@@ -106,16 +106,44 @@ export default function Dashboard() {
     }
   };
 
+ // Replace your existing runTest function with this:
+
   const runTest = async (endpoint: string, name: string) => {
     setLoadingTest(name);
+    setQueryResult(""); 
+
+    // 1. Log the URL we are trying to hit
+    console.log(`🚀 Sending request to: ${API}${endpoint}`);
+
     try {
-      await fetch(`${API}${endpoint}`, { method: 'POST' });
-    } catch { 
-      setQueryResult("ERROR: Failed to trigger test"); 
+      const res = await fetch(`${API}${endpoint}`, { 
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+
+      // 2. Log the raw status
+      console.log(`nb Response Status: ${res.status} ${res.statusText}`);
+
+      if (!res.ok) {
+        // 3. Get the text body of the error (this contains the real Python error)
+        const errorText = await res.text();
+        console.error("❌ Server Error Body:", errorText);
+        throw new Error(`Server Error (${res.status}): ${errorText}`);
+      }
+
+      const data = await res.json();
+      console.log("✅ Success Data:", data);
+      setQueryResult(`SUCCESS: ${data.message}`);
+
+    } catch (err: any) {
+      console.error("💥 FETCH FAILED:", err);
+      setQueryResult(`ERROR: ${err.message}`);
+    } finally {
+      setTimeout(() => setLoadingTest(""), 1000);
     }
-    setTimeout(() => setLoadingTest(""), 1000);
   };
 
+  
   const queueSize = stats?.queue || 0;
 
   return (

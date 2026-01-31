@@ -365,54 +365,76 @@ def metrics_view():
     return dict(metrics)
 
 
+# ---------------- TESTING ENDPOINTS (DEBUG VERSION) ---------------- #
+
 @app.post("/test/chaos")
-async def test_chaos():
-    import httpx, random
+async def test_chaos(request: Request):
+    log("🔵 DEBUG: /test/chaos endpoint hit!")
+    
+    try:
+        import httpx
+    except ImportError:
+        log("❌ CRITICAL ERROR: 'httpx' library is not installed!")
+        raise HTTPException(status_code=500, detail="Server missing httpx library")
 
-    async with httpx.AsyncClient() as client:
-        tasks = []
+    try:
+        # Determine the correct internal URL
+        # In production, we can't always trust localhost:8000 to be accessible via httpx
+        base_url = "http://127.0.0.1:8000"
+        
+        log(f"🔵 Starting Chaos Test targeting: {base_url}")
+        
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            tasks = []
+            for i in range(20):
+                data = {
+                    "id": str(i + 100),
+                    "header": "Age",
+                    "value": str(20 + i)
+                }
+                tasks.append(client.post(f"{base_url}/webhook", json=data))
+            
+            # Fire requests
+            responses = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Count successes vs failures
+            success = sum(1 for r in responses if not isinstance(r, Exception) and r.status_code == 200)
+            errors = len(responses) - success
+            
+            log(f"✅ Chaos Result: {success} sent, {errors} failed")
+            
+            if errors > 0:
+                # Log the first error found
+                first_err = next((r for r in responses if isinstance(r, Exception) or r.status_code != 200), None)
+                log(f"⚠️ Sample Error: {first_err}")
 
-        for i in range(20):
-            data = {
-                "id": str(random.randint(1, 10)),
-                "header": "Age",
-                "value": str(random.randint(18, 78))
-            }
+        return {"message": f"Launched 20 requests ({success} success)"}
 
-            tasks.append(
-                client.post(
-                    "http://localhost:8000/webhook",
-                    json=data
-                )
-            )
-
-        await asyncio.gather(*tasks)
-
-    log("🧪 Chaos test via webhook (parallel)")
-    return {"status": "done", "count": 20}
-
+    except Exception as e:
+        log(f"❌ CRASH inside test_chaos: {str(e)}")
+        # This print ensures it shows up in Railway logs even if logger fails
+        print(f"TRACKBACK: {e}") 
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
 @app.post("/test/deduplication")
-async def test_deduplication():
-    import httpx
+async def test_dedup():
+    log("🔵 DEBUG: /test/deduplication endpoint hit!")
+    try:
+        import httpx
+        base_url = "http://127.0.0.1:8000"
+        
+        data = {"id": "999", "header": "Name", "value": "Duplicate Dave"}
 
-    data = {
-        "id": "2",
-        "header": "Name",
-        "value": "Test Deduplication"
-    }
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            tasks = [client.post(f"{base_url}/webhook", json=data) for _ in range(5)]
+            await asyncio.gather(*tasks)
 
-    async with httpx.AsyncClient() as client:
-        tasks = [
-            client.post("http://localhost:8000/webhook", json=data)
-            for _ in range(5)
-        ]
+        log("✅ Dedup Test Sent")
+        return {"message": "Dedup batch sent"}
 
-        await asyncio.gather(*tasks)
-
-    log("🧪 Dedup test via webhook (parallel)")
-    return {"status": "done", "count": 5}
-
+    except Exception as e:
+        log(f"❌ CRASH inside test_dedup: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/test/status")
 async def test_status():
