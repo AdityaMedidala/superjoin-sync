@@ -201,6 +201,13 @@ async def stats():
 async def execute_query(request: Request):
     data = await request.json()
     query = data.get("query", "")
+    
+    # [FIX] Smart SQL Injection
+    # If the user is updating mytable, force the sync_source to 'DB'
+    if "UPDATE mytable" in query.upper() and "sync_source" not in query:
+        # This is a simple string replacement hack for the demo
+        query = query.replace("SET", "SET sync_source = 'DB', ")
+        
     with engine.begin() as conn:
         result = conn.execute(text(query))
         return {"rows_affected": result.rowcount}
