@@ -11,6 +11,14 @@ import redis.asyncio as redis
 from datetime import datetime
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
+from collections import defaultdict
+
+metrics = defaultdict(int)
+
+logs = []
+metrics = defaultdict(int)
+
+
 
 load_dotenv()
 
@@ -113,14 +121,16 @@ async def worker_sheet_to_db():
                 # [EDGE CASE] DB Locks
                 # Implicitly handled by sequential queue processing + transactions
                 conn.execute(
-                    text(f"UPDATE mytable SET `{db_col}` = :val, sync_source = 'SHEET', last_updated = NOW() WHERE id = :id"),
-                    {"val": val, "id": row_id}
+                     text(f"UPDATE mytable SET `{db_col}` = :val, sync_source = 'SHEET', last_updated = NOW() WHERE id = :id"),
+                     {"val": val, "id": row_id}
                 )
+                metrics["processed"] += 1   # 👈 ADD HERE
                 log(f"✅ Sheet→DB: Row {row_id} | {db_col} = {val}")
 
         except Exception as e:
             log(f"❌ Sheet→DB Worker Error: {e}")
             await asyncio.sleep(2)
+
 
 # ---------------- WORKER: DB → SHEET (Smart Sync) ---------------- #
 
@@ -214,17 +224,29 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 async def webhook(request: Request):
     try:
         data = await request.json()
-        # [EDGE CASE] Data Loss
-        # Pushing to Redis ensures data persists even if the DB worker is busy or crashes
-        await redis_client.rpush("queue:sheet_to_db", json.dumps(data))
+
+        metrics["webhook_hits"] += 1
+
+        await redis_client.rpush(
+            "queue:sheet_to_db",
+            json.dumps(data)
+        )
+
         return {"status": "queued"}
+
     except Exception as e:
         log(f"❌ Webhook Error: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(400, str(e))
+
 
 @app.get("/logs")
 def get_logs(): 
     return {"logs": logs}
+
+@app.get("/metrics")
+def metrics_view():
+    return dict(metrics)
+
 
 @app.get("/stats")
 async def stats():
@@ -232,6 +254,11 @@ async def stats():
         "queue": await redis_client.llen("queue:sheet_to_db"),
         "logs": len(logs)
     }
+
+@app.get("/metrics")
+def metrics_view():
+    return dict(metrics)
+
 
 @app.post("/execute")
 async def execute_query(request: Request):
@@ -296,37 +323,60 @@ async def health():
             "status": "unhealthy",
             "error": str(e)
         }
+    
+@app.get("/metrics")
+def metrics_view():
+    return dict(metrics)
+
 
 @app.post("/test/chaos")
 async def test_chaos():
-    """Simulate 20 concurrent updates for stress testing"""
-    import random
-    
-    for i in range(1, 21):
-        data = {
-            "id": str(min(i, 10)),
-            "header": "Age",
-            "value": str(random.randint(18, 78))
-        }
-        await redis_client.rpush("queue:sheet_to_db", json.dumps(data))
-    
-    log("🧪 Chaos test: 20 concurrent updates queued")
-    return {"status": "queued", "count": 20}
+    import httpx, random
+
+    async with httpx.AsyncClient() as client:
+        tasks = []
+
+        for i in range(20):
+            data = {
+                "id": str(random.randint(1, 10)),
+                "header": "Age",
+                "value": str(random.randint(18, 78))
+            }
+
+            tasks.append(
+                client.post(
+                    "http://localhost:8000/webhook",
+                    json=data
+                )
+            )
+
+        await asyncio.gather(*tasks)
+
+    log("🧪 Chaos test via webhook (parallel)")
+    return {"status": "done", "count": 20}
+
 
 @app.post("/test/deduplication")
 async def test_deduplication():
-    """Test deduplication by sending same update 5 times"""
+    import httpx
+
     data = {
         "id": "2",
         "header": "Name",
         "value": "Test Deduplication"
     }
-    
-    for i in range(5):
-        await redis_client.rpush("queue:sheet_to_db", json.dumps(data))
-    
-    log("🧪 Deduplication test: 5 identical updates queued")
-    return {"status": "queued", "count": 5}
+
+    async with httpx.AsyncClient() as client:
+        tasks = [
+            client.post("http://localhost:8000/webhook", json=data)
+            for _ in range(5)
+        ]
+
+        await asyncio.gather(*tasks)
+
+    log("🧪 Dedup test via webhook (parallel)")
+    return {"status": "done", "count": 5}
+
 
 @app.get("/test/status")
 async def test_status():
@@ -336,6 +386,11 @@ async def test_status():
         "recent_logs": logs[:10],
         "workers": "running"
     }
+
+@app.get("/metrics")
+def metrics_view():
+    return dict(metrics)
+
 
 if __name__ == "__main__":
     import uvicorn
