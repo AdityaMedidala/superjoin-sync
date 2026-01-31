@@ -118,7 +118,7 @@ const logsEndRef = useRef<HTMLTableRowElement>(null);
                 </svg>
               </div>
               <div>
-                <h1 className="text-lg font-bold tracking-tight text-gray-900 leading-none">SyncEngine</h1>
+                <h1 className="text-lg font-bold tracking-tight text-gray-900 leading-none">SuperYou</h1>
                 <p className="text-[10px] uppercase font-semibold text-gray-400 tracking-wider mt-0.5">Enterprise Dashboard</p>
               </div>
             </div>
