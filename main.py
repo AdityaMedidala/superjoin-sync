@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
@@ -28,9 +28,12 @@ COLUMN_MAP = {
     "Status": "status"
 }
 
+# Reverse mapping for DB → Sheet
+DB_TO_SHEET_MAP = {v: k for k, v in COLUMN_MAP.items()}
+
 # ---------------- DATABASE & REDIS ---------------- #
 
-engine = create_engine(DB_URL)
+engine = create_engine(DB_URL, pool_pre_ping=True, pool_recycle=3600)
 redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
 # ---------------- LOGGING ---------------- #
@@ -42,7 +45,7 @@ def log(msg):
     msg = f"[{ts}] {msg}"
     print(msg)
     logs.insert(0, msg)
-    if len(logs) > 50: logs.pop()
+    if len(logs) > 100: logs.pop()
 
 # ---------------- GOOGLE SHEETS ---------------- #
 
@@ -123,13 +126,17 @@ async def worker_sheet_to_db():
 
 async def worker_db_to_sheet():
     log("🔵 Worker started: DB → Sheet")
+    await asyncio.sleep(3)  # Give Sheet→DB worker time to start first
+    
     while True:
         try:
             # [EDGE CASE] Infinite Loops
             # Only sync rows that were NOT updated by 'SHEET'
             # This breaks the loop: Sheet -> DB -> Sheet
             with engine.begin() as conn:
-                rows = conn.execute(text("SELECT * FROM mytable WHERE sync_source = 'DB' LIMIT 5")).mappings().all()
+                rows = conn.execute(text(
+                    "SELECT * FROM mytable WHERE sync_source = 'DB' ORDER BY last_updated ASC LIMIT 5"
+                )).mappings().all()
 
             if not rows:
                 await asyncio.sleep(2)
@@ -140,28 +147,52 @@ async def worker_db_to_sheet():
 
             for row in rows:
                 row_id = row["id"]
-                cell = sheet.find(str(row_id), in_column=1)
+                
+                try:
+                    # Find the row in the sheet
+                    cell = sheet.find(str(row_id), in_column=1)
 
-                if cell:
-                    updates = []
-                    for i, h in enumerate(headers, start=1):
-                        db_col = COLUMN_MAP.get(h)
-                        if db_col in row:
-                            val = row[db_col] or ""
-                            updates.append({"range": f"{chr(64+i)}{cell.row}", "values": [[str(val)]]})
-                    
-                    if updates:
-                        sheet.batch_update(updates)
-                        log(f"✅ DB→Sheet Sync: Row {row_id}")
+                    if cell:
+                        updates = []
+                        for i, h in enumerate(headers, start=1):
+                            db_col = COLUMN_MAP.get(h)
+                            if db_col and db_col in row:
+                                val = row[db_col] or ""
+                                # Get current sheet value to avoid unnecessary updates
+                                current_sheet_val = sheet.cell(cell.row, i).value or ""
+                                
+                                if str(val) != str(current_sheet_val):
+                                    updates.append({
+                                        "range": f"{chr(64+i)}{cell.row}", 
+                                        "values": [[str(val)]]
+                                    })
+                        
+                        if updates:
+                            sheet.batch_update(updates)
+                            log(f"✅ DB→Sheet: Row {row_id} | {len(updates)} field(s) updated")
+                    else:
+                        log(f"⚠️ DB→Sheet: Row {row_id} not found in sheet")
 
-                # Mark as synced so we don't pick it up again
-                with engine.begin() as conn:
-                    conn.execute(text("UPDATE mytable SET sync_source = 'SYNCED' WHERE id = :id"), {"id": row_id})
+                    # Mark as synced so we don't pick it up again
+                    with engine.begin() as conn:
+                        conn.execute(
+                            text("UPDATE mytable SET sync_source = 'SYNCED' WHERE id = :id"), 
+                            {"id": row_id}
+                        )
+
+                except Exception as row_error:
+                    log(f"❌ DB→Sheet Row {row_id} Error: {row_error}")
+                    # Mark as error to prevent infinite retries
+                    with engine.begin() as conn:
+                        conn.execute(
+                            text("UPDATE mytable SET sync_source = 'ERROR' WHERE id = :id"), 
+                            {"id": row_id}
+                        )
 
             await asyncio.sleep(2) # [EDGE CASE] Rate Limits: Throttling requests
             
         except Exception as e:
-            if "429" in str(e):
+            if "429" in str(e) or "quota" in str(e).lower():
                 log("⏳ Google Quota hit! Sleeping 60s...")
                 await asyncio.sleep(60)
             else:
@@ -181,14 +212,19 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 @app.post("/webhook")
 async def webhook(request: Request):
-    data = await request.json()
-    # [EDGE CASE] Data Loss
-    # Pushing to Redis ensures data persists even if the DB worker is busy or crashes
-    await redis_client.rpush("queue:sheet_to_db", json.dumps(data))
-    return {"status": "queued"}
+    try:
+        data = await request.json()
+        # [EDGE CASE] Data Loss
+        # Pushing to Redis ensures data persists even if the DB worker is busy or crashes
+        await redis_client.rpush("queue:sheet_to_db", json.dumps(data))
+        return {"status": "queued"}
+    except Exception as e:
+        log(f"❌ Webhook Error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/logs")
-def get_logs(): return {"logs": logs}
+def get_logs(): 
+    return {"logs": logs}
 
 @app.get("/stats")
 async def stats():
@@ -199,18 +235,67 @@ async def stats():
 
 @app.post("/execute")
 async def execute_query(request: Request):
-    data = await request.json()
-    query = data.get("query", "")
-    
-    # [FIX] Smart SQL Injection
-    # If the user is updating mytable, force the sync_source to 'DB'
-    if "UPDATE mytable" in query.upper() and "sync_source" not in query:
-        # This is a simple string replacement hack for the demo
-        query = query.replace("SET", "SET sync_source = 'DB', ")
+    try:
+        data = await request.json()
+        query = data.get("query", "").strip()
         
-    with engine.begin() as conn:
-        result = conn.execute(text(query))
-        return {"rows_affected": result.rowcount}
+        if not query:
+            return {"error": "Query is empty", "rows_affected": 0}
+        
+        # [FIX] Auto-mark DB updates so they sync to Sheet
+        # If the user is updating mytable and doesn't specify sync_source, set it to 'DB'
+        query_upper = query.upper()
+        
+        if "UPDATE MYTABLE" in query_upper:
+            if "SYNC_SOURCE" not in query_upper:
+                # Smart injection: Add sync_source after SET
+                if " SET " in query_upper:
+                    parts = query.split(" SET ", 1)
+                    if len(parts) == 2:
+                        query = f"{parts[0]} SET sync_source = 'DB', {parts[1]}"
+                        log(f"🔍 Auto-injected sync_source='DB' into query")
+        
+        with engine.begin() as conn:
+            result = conn.execute(text(query))
+            rows_affected = result.rowcount
+            
+            if rows_affected > 0:
+                log(f"✅ Manual Query: {rows_affected} row(s) affected")
+            
+            return {
+                "message": f"Query executed successfully. {rows_affected} row(s) affected.",
+                "rows_affected": rows_affected
+            }
+            
+    except Exception as e:
+        error_msg = str(e)
+        log(f"❌ Query Error: {error_msg}")
+        return {"error": error_msg, "rows_affected": 0}
+
+@app.get("/health")
+async def health():
+    try:
+        # Check DB connection
+        with engine.begin() as conn:
+            conn.execute(text("SELECT 1"))
+        
+        # Check Redis connection
+        await redis_client.ping()
+        
+        # Check Sheet connection
+        await get_sheet_safe()
+        
+        return {
+            "status": "healthy",
+            "database": "connected",
+            "redis": "connected",
+            "sheets": "connected"
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "error": str(e)
+        }
 
 if __name__ == "__main__":
     import uvicorn

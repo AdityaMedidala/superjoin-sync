@@ -20,6 +20,7 @@ const Icons = {
   Check: () => <svg className="w-4 h-4 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>,
   X: () => <svg className="w-4 h-4 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>,
   ArrowRight: () => <svg className="w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M17 8l4 4m0 0l-4 4m4-4H3" /></svg>,
+  Lightning: () => <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>,
 };
 
 export default function Dashboard() {
@@ -32,7 +33,7 @@ export default function Dashboard() {
   const [isExecuting, setIsExecuting] = useState(false);
   
   // Ref for auto-scrolling logs
-const logsEndRef = useRef<HTMLTableRowElement>(null);
+  const logsEndRef = useRef<HTMLTableRowElement>(null);
 
   const API = "https://web-production-645c3.up.railway.app";
   const SHEET_ID = "1bM61VLxcWdg3HaNgc2RkPLL-hm2S-BJ6Jo9lX4Qv1ks";
@@ -53,7 +54,7 @@ const logsEndRef = useRef<HTMLTableRowElement>(null);
           // Only update if data actually changed to prevent render thrashing
           setLogs(prev => {
             const newLogs = logsData.logs || [];
-            return newLogs.length !== prev.length ? newLogs : prev;
+            return JSON.stringify(newLogs) !== JSON.stringify(prev) ? newLogs : prev;
           });
           setStats(statsData);
           setStatus("online");
@@ -89,13 +90,14 @@ const logsEndRef = useRef<HTMLTableRowElement>(null);
       });
       
       const data = await response.json();
-      if (response.ok) {
-        setQueryResult(`SUCCESS: ${data.message || 'Query executed successfully'}`);
+      
+      if (data.error) {
+        setQueryResult(`ERROR: ${data.error}`);
       } else {
-        setQueryResult(`ERROR: ${data.error || 'Query failed'}`);
+        setQueryResult(`SUCCESS: ${data.message || 'Query executed'}`);
       }
     } catch (error) {
-      setQueryResult(`ERROR: Connection failed`);
+      setQueryResult(`ERROR: Network failure - ${error}`);
     } finally {
       setIsExecuting(false);
     }
@@ -113,13 +115,11 @@ const logsEndRef = useRef<HTMLTableRowElement>(null);
             {/* Brand */}
             <div className="flex items-center gap-3">
               <div className="w-8 h-8 bg-orange-600 rounded flex items-center justify-center shadow-sm">
-                <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
-                </svg>
+                <Icons.Lightning />
               </div>
               <div>
-                <h1 className="text-lg font-bold tracking-tight text-gray-900 leading-none">SuperYou</h1>
-                <p className="text-[10px] uppercase font-semibold text-gray-400 tracking-wider mt-0.5">Enterprise Dashboard</p>
+                <h1 className="text-lg font-bold tracking-tight text-gray-900 leading-none">SuperSync</h1>
+                <p className="text-[10px] uppercase font-semibold text-gray-400 tracking-wider mt-0.5">Real-Time Sync Dashboard</p>
               </div>
             </div>
 
@@ -154,7 +154,7 @@ const logsEndRef = useRef<HTMLTableRowElement>(null);
           <StatCard 
             label="Total Events" 
             value={logs.length} 
-            subtext="Last 60 minutes"
+            subtext="Last 100 events"
           />
           <StatCard 
             label="System Health" 
@@ -173,55 +173,48 @@ const logsEndRef = useRef<HTMLTableRowElement>(null);
               <div className="px-4 py-3 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <Icons.Database />
-                  <span className="text-sm font-semibold text-gray-700">SQL Console</span>
+                  <h3 className="text-sm font-semibold text-gray-700">SQL Query Editor</h3>
                 </div>
-                <span className="text-xs text-gray-400 font-mono">PostgreSQL</span>
+                <span className="text-xs text-gray-400 font-mono">MySQL</span>
               </div>
-              
-              <div className="p-4 space-y-4">
-                <div className="relative">
-                  <textarea
-                    value={sqlQuery}
-                    onChange={(e) => setSqlQuery(e.target.value)}
-                    className="w-full h-32 px-3 py-2 text-sm font-mono text-gray-800 bg-gray-50 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all resize-none placeholder-gray-400 leading-relaxed"
-                    spellCheck={false}
-                    placeholder="Enter SQL Query..."
-                  />
-                  {/* Subtle 'Update' badge if it's an update query */}
-                  {sqlQuery.toUpperCase().startsWith("UPDATE") && (
-                    <span className="absolute top-2 right-2 text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded border border-blue-100">
-                      WRITE OP
-                    </span>
-                  )}
-                </div>
 
-                <div className="flex items-center justify-between gap-3">
-                  <button
-                    onClick={() => setSqlQuery("")}
-                    className="text-xs text-gray-400 hover:text-gray-600 font-medium px-2"
-                  >
-                    Clear
-                  </button>
-                  <button
-                    onClick={executeQuery}
-                    disabled={isExecuting || !sqlQuery.trim()}
-                    className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium text-white bg-orange-600 hover:bg-orange-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-md shadow-sm transition-all active:scale-[0.98]"
-                  >
-                    {isExecuting ? (
-                      <>
-                        <svg className="animate-spin h-4 w-4 text-white" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                        </svg>
-                        <span>Running...</span>
-                      </>
-                    ) : (
-                      <>
-                        <Icons.Play />
-                        <span>Run Query</span>
-                      </>
-                    )}
-                  </button>
+              <div className="p-4 space-y-3">
+                {/* Textarea */}
+                <textarea
+                  value={sqlQuery}
+                  onChange={(e) => setSqlQuery(e.target.value)}
+                  placeholder="Enter your SQL query..."
+                  className="w-full h-32 px-3 py-2 text-sm font-mono bg-gray-50 border border-gray-200 rounded-md focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent resize-none"
+                />
+
+                {/* Execute Button */}
+                <button
+                  onClick={executeQuery}
+                  disabled={isExecuting || !sqlQuery.trim()}
+                  className={`w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-md font-medium transition-all ${
+                    isExecuting || !sqlQuery.trim()
+                      ? "bg-gray-100 text-gray-400 cursor-not-allowed"
+                      : "bg-orange-600 text-white hover:bg-orange-700 shadow-sm hover:shadow-md"
+                  }`}
+                >
+                  {isExecuting ? (
+                    <>
+                      <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                      <span>Executing...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Icons.Play />
+                      <span>Execute Query</span>
+                    </>
+                  )}
+                </button>
+
+                {/* Info Box */}
+                <div className="p-3 bg-blue-50 border-l-4 border-blue-400 rounded-r-md">
+                  <p className="text-xs text-blue-800">
+                    <strong>💡 Auto-Sync:</strong> UPDATE queries automatically set sync_source='DB' so changes propagate to Google Sheets.
+                  </p>
                 </div>
 
                 {/* Result Area */}
@@ -239,36 +232,58 @@ const logsEndRef = useRef<HTMLTableRowElement>(null);
 
             {/* Quick Actions Panel */}
             <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-4">
-              <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Debug Tools</h3>
+              <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Quick Actions</h3>
               <div className="space-y-2">
                 <QuickActionButton 
-                  label="Update Row ID:1" 
-                  desc="Test single row sync"
-                  onClick={() => setSqlQuery("UPDATE mytable SET Age = Age + 1 WHERE id = 1;")} 
+                  label="Update Single Row" 
+                  desc="Test DB→Sheet sync"
+                  onClick={() => setSqlQuery("UPDATE mytable SET Age = 29, Name = 'Bob Smith' WHERE id = 1;")} 
                 />
                 <QuickActionButton 
-                  label="Batch Update" 
-                  desc="Stress test with 5 rows"
+                  label="Batch Update (5 rows)" 
+                  desc="Stress test sync queue"
                   onClick={() => setSqlQuery("UPDATE mytable SET Age = Age + 1 WHERE id <= 5;")} 
                 />
+                <QuickActionButton 
+                  label="Invalid Age Test" 
+                  desc="Test validation logic"
+                  onClick={() => setSqlQuery("UPDATE mytable SET Age = -5 WHERE id = 1;")} 
+                />
               </div>
+            </div>
+
+            {/* Edge Case Documentation */}
+            <div className="bg-gradient-to-br from-orange-50 to-orange-100 rounded-lg border border-orange-200 shadow-sm p-4">
+              <h3 className="text-xs font-semibold text-orange-800 uppercase tracking-wider mb-2 flex items-center gap-2">
+                <Icons.Check />
+                <span>Handled Edge Cases</span>
+              </h3>
+              <ul className="text-xs text-orange-700 space-y-1.5">
+                <li>✅ Concurrent edits (LockService)</li>
+                <li>✅ Infinite sync loops (sync_source flag)</li>
+                <li>✅ Database locks (queue-based processing)</li>
+                <li>✅ Network failures (retry + muteExceptions)</li>
+                <li>✅ Data deduplication (read-before-write)</li>
+                <li>✅ Bulk paste blocking (safety validation)</li>
+                <li>✅ Rate limit handling (60s backoff)</li>
+              </ul>
             </div>
           </div>
 
           {/* Right: Activity Log (8 cols) */}
           <div className="lg:col-span-8">
-            <div className="bg-white rounded-lg border border-gray-200 shadow-sm flex flex-col h-[600px]">
+            <div className="bg-white rounded-lg border border-gray-200 shadow-sm flex flex-col h-[700px]">
               <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
                 <div>
                   <h2 className="text-base font-semibold text-gray-900">Activity Stream</h2>
-                  <p className="text-sm text-gray-500">Real-time database-to-sheet synchronization events</p>
+                  <p className="text-sm text-gray-500">Real-time bidirectional sync events</p>
                 </div>
                 <div className="flex items-center gap-2">
-                   <span className="flex h-2 w-2 relative">
-                      <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${status === 'online' ? 'bg-orange-400' : 'bg-gray-400'}`}></span>
-                      <span className={`relative inline-flex rounded-full h-2 w-2 ${status === 'online' ? 'bg-orange-500' : 'bg-gray-500'}`}></span>
-                    </span>
-                    <span className="text-xs font-medium text-gray-500">Live</span>
+                  <span className="flex h-2 w-2 relative">
+                    <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${status === 'online' ? 'bg-orange-400' : 'bg-gray-400'}`}></span>
+                    <span className={`relative inline-flex rounded-full h-2 w-2 ${status === 'online' ? 'bg-orange-500' : 'bg-gray-500'}`}></span>
+                  </span>
+                  <span className="text-xs font-medium text-gray-500">Live</span>
                 </div>
               </div>
 
@@ -276,9 +291,10 @@ const logsEndRef = useRef<HTMLTableRowElement>(null);
                 {logs.length === 0 ? (
                   <div className="h-full flex flex-col items-center justify-center text-center opacity-60">
                     <div className="p-4 bg-gray-50 rounded-full mb-3">
-                       <Icons.Refresh />
+                      <Icons.Refresh />
                     </div>
-                    <p className="text-sm text-gray-500">Waiting for events...</p>
+                    <p className="text-sm text-gray-500">Waiting for sync events...</p>
+                    <p className="text-xs text-gray-400 mt-1">Try editing a cell in Google Sheets</p>
                   </div>
                 ) : (
                   <table className="w-full text-left border-collapse">
@@ -374,9 +390,14 @@ function LogEntry({ log }: { log: string }) {
   else if (log.includes("❌")) statusType = "error";
   else if (log.includes("📥") || log.includes("⏭️")) statusType = "process";
   else if (log.includes("⚠️")) statusType = "warning";
+  else if (log.includes("🔍") || log.includes("🔵")) statusType = "info";
 
-  const cleanLog = log.replace(/[✅❌📥📤⏭️⚠️🔵🔍✏️]/g, '').trim();
-  const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const cleanLog = log.replace(/[✅❌📥📤⏭️⚠️🔵🔍✏️⏳]/g, '').trim();
+  
+  // Extract timestamp from log if present [HH:MM:SS]
+  const timeMatch = cleanLog.match(/\[(\d{2}:\d{2}:\d{2})\]/);
+  const time = timeMatch ? timeMatch[1] : new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const message = timeMatch ? cleanLog.replace(/\[\d{2}:\d{2}:\d{2}\]\s*/, '') : cleanLog;
 
   return (
     <tr className="hover:bg-gray-50/80 transition-colors group">
@@ -384,11 +405,11 @@ function LogEntry({ log }: { log: string }) {
         {statusType === "success" && <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-50 text-green-700 border border-green-100">Success</span>}
         {statusType === "error" && <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-50 text-red-700 border border-red-100">Error</span>}
         {statusType === "process" && <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-50 text-blue-700 border border-blue-100">Sync</span>}
-        {statusType === "warning" && <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-50 text-yellow-700 border border-yellow-100">Info</span>}
-        {statusType === "info" && <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">Log</span>}
+        {statusType === "warning" && <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-50 text-yellow-700 border border-yellow-100">Warning</span>}
+        {statusType === "info" && <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">Info</span>}
       </td>
       <td className="px-6 py-3 text-sm text-gray-700 font-mono">
-        {cleanLog}
+        {message}
       </td>
       <td className="px-6 py-3 text-xs text-gray-400 text-right whitespace-nowrap font-mono">
         {time}
