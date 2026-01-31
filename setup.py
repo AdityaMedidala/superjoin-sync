@@ -78,13 +78,10 @@ def load_from_sheet():
 
 
 def reset_and_seed(df):
-
     print("🔵 Connecting to MySQL...")
-
     engine = create_engine(DB_URL)
 
     print("⚠️  Resetting table: mytable")
-
     df.to_sql(
         "mytable",
         con=engine,
@@ -93,14 +90,12 @@ def reset_and_seed(df):
     )
 
     with engine.begin() as conn:
-
         conn.execute(text("""
             ALTER TABLE mytable
             ADD COLUMN last_updated TIMESTAMP
             DEFAULT CURRENT_TIMESTAMP
             ON UPDATE CURRENT_TIMESTAMP
         """))
-
         conn.execute(text("""
             ALTER TABLE mytable
             ADD COLUMN sync_source VARCHAR(50)
@@ -109,6 +104,26 @@ def reset_and_seed(df):
 
     print("✅ Database seeded successfully")
 
+    # --- NEW CODE TO UPDATE GOOGLE SHEET ---
+    print("🔵 Updating Google Sheet to match...")
+    try:
+        gc = get_sheet_client()
+        sh = gc.open_by_key(SHEET_ID).sheet1
+        
+        # 1. Clear the entire sheet
+        sh.clear()
+        
+        # 2. Prepare data (Headers + Rows)
+        # We only want to push the columns from the dataframe (id, Name, Email, Age, City)
+        headers = df.columns.tolist()
+        values = [headers] + df.values.tolist()
+        
+        # 3. Batch update the sheet
+        sh.update('A1', values)
+        print(f"✅ Google Sheet updated with {len(df)} rows and columns: {headers}")
+        
+    except Exception as e:
+        print(f"❌ Failed to update Google Sheet: {e}")
 
 # ---------------- MAIN ---------------- #
 
