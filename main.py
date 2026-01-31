@@ -13,6 +13,8 @@ from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 from collections import defaultdict
 
+from httpx import AsyncClient, ASGITransport # Make sure to import ASGITransport
+
 metrics = defaultdict(int)
 
 logs = []
@@ -449,57 +451,58 @@ async def test_status():
 def metrics_view():
     return dict(metrics)
 
-# ---------------- TESTING ENDPOINTS ---------------- #
+# ---------------- TESTING ENDPOINTS (FIXED FOR DOCKER) ---------------- #
+from httpx import AsyncClient, ASGITransport # <--- MAKE SURE THIS IS IMPORTED
 
 @app.post("/test/chaos")
 async def test_chaos():
-    """Simulates 20 users hitting save at the exact same time"""
-    import httpx
-    import random
+    """Simulates 20 users hitting save at the exact same time (In-Memory)"""
+    log("🧪 STARTING CHAOS: Simulating 20 concurrent users (In-Memory)...")
     
-    log("🧪 STARTING CHAOS: Simulating 20 concurrent users...")
+    # This bypasses the network port entirely and talks directly to the app
+    transport = ASGITransport(app=app)
     
-    async with httpx.AsyncClient() as client:
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
         tasks = []
         for i in range(20):
             # Create random data
             data = {
-                "id": str(random.randint(100, 200)), # Random IDs
+                "id": str(i + 1000), 
                 "header": "Age",
-                "value": str(random.randint(18, 90))
+                "value": str(20 + i)
             }
-            # Fire requests in PARALLEL (asyncio.gather)
-            tasks.append(
-                client.post("http://localhost:8000/webhook", json=data)
-            )
+            # Note: URL is just "/webhook", not "http://localhost:8000/webhook"
+            tasks.append(client.post("/webhook", json=data))
         
-        await asyncio.gather(*tasks)
+        # Fire requests in PARALLEL
+        responses = await asyncio.gather(*tasks)
+        
+        success = sum(1 for r in responses if r.status_code == 200)
 
-    return {"message": "🚀 Chaos launched! Watch the Queue."}
+    return {"message": f"🚀 Chaos launched! {success}/20 requests accepted."}
 
 
 @app.post("/test/deduplication")
 async def test_dedup():
-    """Sends the EXACT same payload 10 times rapidly"""
-    import httpx
-    
+    """Sends the EXACT same payload 10 times rapidly (In-Memory)"""
     log("🧪 STARTING DEDUP TEST: Sending 10 identical requests...")
     
+    transport = ASGITransport(app=app)
+    
     data = {
-        "id": "999", 
+        "id": "9999", 
         "header": "Name", 
         "value": "Duplicate Dave" 
     }
 
-    async with httpx.AsyncClient() as client:
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
         tasks = [
-            client.post("http://localhost:8000/webhook", json=data)
+            client.post("/webhook", json=data)
             for _ in range(10)
         ]
         await asyncio.gather(*tasks)
 
-    return {"message": "🧪 Dedup sent. You should see only 1 update."}
-
+    return {"message": "🧪 Dedup sent. Check logs for 'Skipped duplicate'."}
 
 if __name__ == "__main__":
     import uvicorn
