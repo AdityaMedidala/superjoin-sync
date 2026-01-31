@@ -297,6 +297,46 @@ async def health():
             "error": str(e)
         }
 
+@app.post("/test/chaos")
+async def test_chaos():
+    """Simulate 20 concurrent updates for stress testing"""
+    import random
+    
+    for i in range(1, 21):
+        data = {
+            "id": str(min(i, 10)),
+            "header": "Age",
+            "value": str(random.randint(18, 78))
+        }
+        await redis_client.rpush("queue:sheet_to_db", json.dumps(data))
+    
+    log("🧪 Chaos test: 20 concurrent updates queued")
+    return {"status": "queued", "count": 20}
+
+@app.post("/test/deduplication")
+async def test_deduplication():
+    """Test deduplication by sending same update 5 times"""
+    data = {
+        "id": "2",
+        "header": "Name",
+        "value": "Test Deduplication"
+    }
+    
+    for i in range(5):
+        await redis_client.rpush("queue:sheet_to_db", json.dumps(data))
+    
+    log("🧪 Deduplication test: 5 identical updates queued")
+    return {"status": "queued", "count": 5}
+
+@app.get("/test/status")
+async def test_status():
+    """Get detailed system status for testing"""
+    return {
+        "queue_depth": await redis_client.llen("queue:sheet_to_db"),
+        "recent_logs": logs[:10],
+        "workers": "running"
+    }
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
