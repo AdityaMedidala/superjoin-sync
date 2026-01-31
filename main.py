@@ -23,9 +23,10 @@ SHEET_ID = os.getenv("SHEET_ID", "1bM61VLxcWdg3HaNgc2RkPLL-hm2S-BJ6Jo9lX4Qv1ks")
 # IMPORTANT: Define how Sheet Headers map to your DB Columns
 # "Sheet Header Name": "Database Column Name"
 COLUMN_MAP = {
-    "Name": "name",           
-    "Email": "user_email",    
-    "Phone": "phone",
+    "Name": "Name", # Ensure this matches your DB (setup.py uses "Name")
+    "Email": "Email",
+    "Age": "Age",    # <--- ADD THIS LINE
+    "City": "City",
     "Status": "status"
 }
 
