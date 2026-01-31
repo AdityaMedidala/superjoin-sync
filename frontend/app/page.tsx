@@ -19,6 +19,8 @@ const Icons = {
   Layers: () => <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" /></svg>,
   Code: () => <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" /></svg>,
   Spinner: () => <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>,
+  Zap: () => <svg className="w-5 h-5 text-yellow-400" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clipRule="evenodd" /></svg>,
+  Shield: () => <svg className="w-5 h-5 text-emerald-400" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" /></svg>,
 };
 
 export default function Dashboard() {
@@ -26,12 +28,18 @@ export default function Dashboard() {
   const [logs, setLogs] = useState<string[]>([]);
   const [stats, setStats] = useState<StatsData | null>(null);
   const [status, setStatus] = useState<"online" | "offline" | "connecting">("connecting");
+  
+  // SQL State
   const [sqlQuery, setSqlQuery] = useState("UPDATE mytable SET Age = 30 WHERE id = 1;");
   const [queryResult, setQueryResult] = useState<string>("");
   const [isExecuting, setIsExecuting] = useState(false);
   
+  // Test State
+  const [loadingTest, setLoadingTest] = useState("");
+  
   const logsEndRef = useRef<HTMLTableRowElement>(null);
 
+  // 🔴 IMPORTANT: Ensure this matches your backend URL
   const API = "https://web-production-645c3.up.railway.app";
   const SHEET_ID = "1bM61VLxcWdg3HaNgc2RkPLL-hm2S-BJ6Jo9lX4Qv1ks";
 
@@ -63,7 +71,7 @@ export default function Dashboard() {
     };
 
     fetchData();
-    const interval = setInterval(fetchData, 2000);
+    const interval = setInterval(fetchData, 1000); // Fast polling
     return () => clearInterval(interval);
   }, [API]);
 
@@ -96,6 +104,16 @@ export default function Dashboard() {
     } finally {
       setIsExecuting(false);
     }
+  };
+
+  const runTest = async (endpoint: string, name: string) => {
+    setLoadingTest(name);
+    try {
+      await fetch(`${API}${endpoint}`, { method: 'POST' });
+    } catch { 
+      setQueryResult("ERROR: Failed to trigger test"); 
+    }
+    setTimeout(() => setLoadingTest(""), 1000);
   };
 
   const queueSize = stats?.queue || 0;
@@ -172,8 +190,10 @@ export default function Dashboard() {
         {/* Main Content Grid */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           
-          {/* Left: SQL Console */}
+          {/* LEFT COLUMN: Controls */}
           <div className="lg:col-span-5 space-y-6">
+            
+            {/* 1. SQL Console */}
             <div className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md overflow-hidden">
               <div className="px-6 py-4 border-b border-white/10 flex items-center justify-between">
                 <div className="flex items-center gap-2">
@@ -218,11 +238,46 @@ export default function Dashboard() {
                 )}
               </div>
             </div>
+
+            {/* 2. Stress Testing Zone (NEW) */}
+            <div className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md overflow-hidden p-6 space-y-6">
+                <div className="flex items-center gap-2 mb-4">
+                  <Icons.Zap />
+                  <h2 className="font-semibold text-lg">Stress Testing Zone</h2>
+                </div>
+                
+                <div className="grid grid-cols-2 gap-4">
+                  <button
+                    onClick={() => runTest('/test/chaos', 'chaos')}
+                    disabled={!!loadingTest}
+                    className="group relative overflow-hidden p-4 rounded-xl bg-gradient-to-br from-purple-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 transition-all text-left"
+                  >
+                    <div className="relative z-10">
+                      <div className="font-bold">💥 Chaos Mode</div>
+                      <div className="text-xs text-blue-100 mt-1">20 parallel users</div>
+                    </div>
+                    {loadingTest === 'chaos' && <div className="absolute inset-0 bg-white/20 animate-pulse" />}
+                  </button>
+
+                  <button
+                    onClick={() => runTest('/test/deduplication', 'dedup')}
+                    disabled={!!loadingTest}
+                    className="group relative overflow-hidden p-4 rounded-xl bg-gradient-to-br from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 transition-all text-left"
+                  >
+                    <div className="relative z-10">
+                      <div className="font-bold">🛡️ Dedup Test</div>
+                      <div className="text-xs text-emerald-100 mt-1">10 duplicate events</div>
+                    </div>
+                    {loadingTest === 'dedup' && <div className="absolute inset-0 bg-white/20 animate-pulse" />}
+                  </button>
+                </div>
+            </div>
+
           </div>
 
-          {/* Right: Logs */}
+          {/* RIGHT COLUMN: Logs */}
           <div className="lg:col-span-7">
-             <div className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md overflow-hidden flex flex-col h-[600px]">
+             <div className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md overflow-hidden flex flex-col h-[750px]">
               <div className="px-6 py-4 border-b border-white/10 flex items-center justify-between bg-white/5">
                 <h2 className="font-semibold text-white">Live System Logs</h2>
                 <div className="flex items-center gap-2 text-xs text-slate-400">

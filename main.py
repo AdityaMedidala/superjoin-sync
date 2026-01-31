@@ -416,6 +416,57 @@ async def test_status():
 def metrics_view():
     return dict(metrics)
 
+# ---------------- TESTING ENDPOINTS ---------------- #
+
+@app.post("/test/chaos")
+async def test_chaos():
+    """Simulates 20 users hitting save at the exact same time"""
+    import httpx
+    import random
+    
+    log("🧪 STARTING CHAOS: Simulating 20 concurrent users...")
+    
+    async with httpx.AsyncClient() as client:
+        tasks = []
+        for i in range(20):
+            # Create random data
+            data = {
+                "id": str(random.randint(100, 200)), # Random IDs
+                "header": "Age",
+                "value": str(random.randint(18, 90))
+            }
+            # Fire requests in PARALLEL (asyncio.gather)
+            tasks.append(
+                client.post("http://localhost:8000/webhook", json=data)
+            )
+        
+        await asyncio.gather(*tasks)
+
+    return {"message": "🚀 Chaos launched! Watch the Queue."}
+
+
+@app.post("/test/deduplication")
+async def test_dedup():
+    """Sends the EXACT same payload 10 times rapidly"""
+    import httpx
+    
+    log("🧪 STARTING DEDUP TEST: Sending 10 identical requests...")
+    
+    data = {
+        "id": "999", 
+        "header": "Name", 
+        "value": "Duplicate Dave" 
+    }
+
+    async with httpx.AsyncClient() as client:
+        tasks = [
+            client.post("http://localhost:8000/webhook", json=data)
+            for _ in range(10)
+        ]
+        await asyncio.gather(*tasks)
+
+    return {"message": "🧪 Dedup sent. You should see only 1 update."}
+
 
 if __name__ == "__main__":
     import uvicorn
