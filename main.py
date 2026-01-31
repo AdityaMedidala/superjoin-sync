@@ -77,6 +77,8 @@ async def get_sheet_safe():
 
 # ---------------- WORKERS ---------------- #
 
+# ---------------- WORKER: SHEET → DB (With Upsert) ---------------- #
+
 async def worker_sheet_to_db():
     log("🔵 Worker started: Sheet → DB")
     while True:
@@ -97,22 +99,27 @@ async def worker_sheet_to_db():
             if not db_col or not row_id: continue
 
             with engine.begin() as conn:
-                # Deduplication check
-                current_val = conn.execute(
-                    text(f"SELECT `{db_col}` FROM mytable WHERE id = :id"),
-                    {"id": row_id}
-                ).scalar()
-
-                if str(current_val) == str(val):
-                    log(f"⏭️ Skipped duplicate: ID {row_id}")
-                    continue
-
-                conn.execute(
+                # 1. Try to UPDATE existing row
+                result = conn.execute(
                     text(f"UPDATE mytable SET `{db_col}` = :val, sync_source = 'SHEET', last_updated = NOW() WHERE id = :id"),
                     {"val": val, "id": row_id}
                 )
+
+                # 2. If NO row was updated, it means ID doesn't exist -> INSERT NEW
+                if result.rowcount == 0:
+                    log(f"✨ New User Detected: Creating ID {row_id}...")
+                    conn.execute(
+                        text(f"INSERT INTO mytable (id, `{db_col}`, sync_source) VALUES (:id, :val, 'SHEET')"),
+                        {"id": row_id, "val": val}
+                    )
+                    log(f"✅ Created New Row {row_id}")
+                else:
+                    log(f"✅ Updated Row {row_id}")
+                
                 metrics["processed"] += 1
-                log(f"✅ Sheet→DB: Row {row_id} | {db_col} = {val}")
+
+                # Optional: Add a tiny sleep so you can see the Queue Depth on Dashboard
+                # await asyncio.sleep(0.2) 
 
         except Exception as e:
             log(f"❌ Sheet→DB Worker Error: {e}")
