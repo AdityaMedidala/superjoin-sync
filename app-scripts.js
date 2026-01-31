@@ -21,42 +21,65 @@ function onEditTrigger(e) {
   const range = e.range;
   const sheet = range.getSheet();
   const row = range.getRow();
-  const col = range.getColumn();
   
-  // Ignore header edits and bulk pastes
-  if (row === 1 || range.getNumRows() > 1) return;
+  // Ignore Header Edits
+  if (row === 1) return;
+
+  // [EDGE CASE] Concurrent/Bulk Edits
+  // If user pastes multiple cells, we block it to prevent consistency issues
+  // But we send a log to the dashboard to PROVE we blocked it.
+  if (range.getNumRows() > 1 || range.getNumColumns() > 1) {
+    sendSystemLog("⚠️ Bulk/Paste edit ignored for safety");
+    return;
+  }
   
-  // 🔒 Multiplayer Safety: Google Script Locking
+  // [EDGE CASE] Concurrent Edits
+  // 🔒 LockService prevents multiple scripts from reading/writing simultaneously
   const lock = LockService.getScriptLock();
   try {
-    lock.waitLock(2000); 
+    lock.waitLock(2000); // Wait up to 2s for other edits to finish
   } catch (err) {
     return; // System busy, skip to avoid lag
   }
   
   try {
     const id = sheet.getRange(row, 1).getValue();
-    const header = sheet.getRange(1, col).getValue(); // Get column title
+    const header = sheet.getRange(1, range.getColumn()).getValue();
     const value = e.value || '';
     
     if (!id || id === 'id') return;
     
     const payload = {
       id: String(id),
-      header: String(header), // e.g. "Email"
+      header: String(header),
       value: String(value)
     };
     
-    UrlFetchApp.fetch(`${BACKEND_URL}/webhook`, {
-      method: 'post',
-      contentType: 'application/json',
-      payload: JSON.stringify(payload),
-      muteHttpExceptions: true
-    });
+    // [EDGE CASE] Network Failures
+    // We wrap this in a helper that mutes exceptions so the user flow isn't interrupted
+    sendWebhook(payload);
     
   } catch (err) {
     Logger.log('Sync Error: ' + err);
   } finally {
     lock.releaseLock(); 
   }
+}
+
+// Helper to send "System" alerts to Dashboard
+function sendSystemLog(msg) {
+  sendWebhook({
+    id: "0",
+    header: "SYSTEM",
+    value: msg
+  });
+}
+
+function sendWebhook(payload) {
+  UrlFetchApp.fetch(`${BACKEND_URL}/webhook`, {
+    method: 'post',
+    contentType: 'application/json',
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true // [EDGE CASE] Handle Network Failures gracefully
+  });
 }

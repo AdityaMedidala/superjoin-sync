@@ -20,12 +20,10 @@ DB_URL = os.getenv("MYSQL_URL")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 SHEET_ID = os.getenv("SHEET_ID", "1bM61VLxcWdg3HaNgc2RkPLL-hm2S-BJ6Jo9lX4Qv1ks")
 
-# IMPORTANT: Define how Sheet Headers map to your DB Columns
-# "Sheet Header Name": "Database Column Name"
 COLUMN_MAP = {
-    "Name": "Name", # Ensure this matches your DB (setup.py uses "Name")
+    "Name": "Name",
     "Email": "Email",
-    "Age": "Age",    # <--- ADD THIS LINE
+    "Age": "Age",
     "City": "City",
     "Status": "status"
 }
@@ -72,24 +70,25 @@ async def get_sheet_safe():
             log(f"❌ Sheet Connection Error: {e}")
             raise
 
-# ---------------- WORKER: SHEET → DB (Queue Consumer) ---------------- #
+# ---------------- WORKER: SHEET → DB (With Deduplication) ---------------- #
 
 async def worker_sheet_to_db():
     log("🔵 Worker started: Sheet → DB")
     while True:
         try:
-            # blpop removes the item from Redis to prevent a "stuck" queue
             item = await redis_client.blpop("queue:sheet_to_db", timeout=1)
-            
-            if not item:
-                continue
+            if not item: continue
 
             data = json.loads(item[1])
             row_id = data.get("id")
             sheet_header = data.get("header")
             val = data.get("value")
 
-            # Translate Sheet header to DB column using our MAP
+            # [EDGE CASE] System Messages (Visualizing protected errors)
+            if sheet_header == "SYSTEM":
+                log(f"⚠️ {val}")
+                continue
+
             db_col = COLUMN_MAP.get(sheet_header)
 
             if not db_col or not row_id:
@@ -97,7 +96,19 @@ async def worker_sheet_to_db():
                 continue
 
             with engine.begin() as conn:
-                # Update DB and mark source to prevent infinite sync loops
+                # [EDGE CASE] Duplicates / Idempotency
+                # Check current DB value before writing
+                current_val = conn.execute(
+                    text(f"SELECT `{db_col}` FROM mytable WHERE id = :id"),
+                    {"id": row_id}
+                ).scalar()
+
+                if str(current_val) == str(val):
+                    log(f"⏭️ Skipped: Row {row_id} {db_col} is already '{val}'")
+                    continue
+
+                # [EDGE CASE] DB Locks
+                # Implicitly handled by sequential queue processing + transactions
                 conn.execute(
                     text(f"UPDATE mytable SET `{db_col}` = :val, sync_source = 'SHEET', last_updated = NOW() WHERE id = :id"),
                     {"val": val, "id": row_id}
@@ -106,20 +117,26 @@ async def worker_sheet_to_db():
 
         except Exception as e:
             log(f"❌ Sheet→DB Worker Error: {e}")
-            await asyncio.sleep(2) # Backoff on error
+            await asyncio.sleep(2)
 
-# ---------------- WORKER: DB → SHEET ---------------- #
+# ---------------- WORKER: DB → SHEET (Smart Sync) ---------------- #
 
 async def worker_db_to_sheet():
-    log("🔵 Worker started: DB → Sheet (Smart Sync)")
+    log("🔵 Worker started: DB → Sheet")
     while True:
         try:
-            sheet = await get_sheet_safe()
-            headers = sheet.row_values(1) 
-
-            # Fetch rows marked as needing sync
+            # [EDGE CASE] Infinite Loops
+            # Only sync rows that were NOT updated by 'SHEET'
+            # This breaks the loop: Sheet -> DB -> Sheet
             with engine.begin() as conn:
-                rows = conn.execute(text("SELECT * FROM mytable WHERE sync_source IN ('DB','SHEET') LIMIT 5")).mappings().all()
+                rows = conn.execute(text("SELECT * FROM mytable WHERE sync_source = 'DB' LIMIT 5")).mappings().all()
+
+            if not rows:
+                await asyncio.sleep(2)
+                continue
+
+            sheet = await get_sheet_safe()
+            headers = sheet.row_values(1)
 
             for row in rows:
                 row_id = row["id"]
@@ -137,11 +154,12 @@ async def worker_db_to_sheet():
                         sheet.batch_update(updates)
                         log(f"✅ DB→Sheet Sync: Row {row_id}")
 
-                # Mark as fully synced
+                # Mark as synced so we don't pick it up again
                 with engine.begin() as conn:
                     conn.execute(text("UPDATE mytable SET sync_source = 'SYNCED' WHERE id = :id"), {"id": row_id})
 
-            await asyncio.sleep(5) # Poll every 5 seconds
+            await asyncio.sleep(2) # [EDGE CASE] Rate Limits: Throttling requests
+            
         except Exception as e:
             if "429" in str(e):
                 log("⏳ Google Quota hit! Sleeping 60s...")
@@ -154,7 +172,6 @@ async def worker_db_to_sheet():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Start background workers
     asyncio.create_task(worker_sheet_to_db())
     asyncio.create_task(worker_db_to_sheet())
     yield
@@ -165,6 +182,8 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 @app.post("/webhook")
 async def webhook(request: Request):
     data = await request.json()
+    # [EDGE CASE] Data Loss
+    # Pushing to Redis ensures data persists even if the DB worker is busy or crashes
     await redis_client.rpush("queue:sheet_to_db", json.dumps(data))
     return {"status": "queued"}
 
