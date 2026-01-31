@@ -133,19 +133,18 @@ async def worker_sheet_to_db():
 
 
 # ---------------- WORKER: DB → SHEET (Smart Sync) ---------------- #
+# ---------------- WORKER: DB → SHEET (Smart Sync) ---------------- #
 
 async def worker_db_to_sheet():
     log("🔵 Worker started: DB → Sheet")
-    await asyncio.sleep(3)  # Give Sheet→DB worker time to start first
+    await asyncio.sleep(3) 
     
     while True:
         try:
-            # [EDGE CASE] Infinite Loops
-            # Only sync rows that were NOT updated by 'SHEET'
-            # This breaks the loop: Sheet -> DB -> Sheet
+            # 1. Fetch rows from DB that need syncing
             with engine.begin() as conn:
                 rows = conn.execute(text(
-                    "SELECT * FROM mytable WHERE sync_source = 'DB' ORDER BY last_updated ASC LIMIT 5"
+                    "SELECT * FROM mytable WHERE sync_source = 'DB' ORDER BY last_updated ASC LIMIT 10"
                 )).mappings().all()
 
             if not rows:
@@ -155,58 +154,84 @@ async def worker_db_to_sheet():
             sheet = await get_sheet_safe()
             headers = sheet.row_values(1)
 
+            # 2. OPTIMIZATION: Fetch ALL IDs from the sheet in ONE call
+            # This prevents the 429 Quota Exceeded error
+            sheet_ids = sheet.col_values(1) 
+            id_map = {str(val).strip(): i + 1 for i, val in enumerate(sheet_ids)}
+
+            updates = []
+            synced_ids = []
+            error_ids = []
+
             for row in rows:
-                row_id = row["id"]
+                row_id = str(row["id"])
                 
                 try:
-                    # Find the row in the sheet
-                    cell = sheet.find(str(row_id), in_column=1)
-
-                    if cell:
-                        updates = []
+                    # Check if ID exists in our local map (No API call needed here)
+                    if row_id in id_map:
+                        row_num = id_map[row_id]
+                        
                         for i, h in enumerate(headers, start=1):
                             db_col = COLUMN_MAP.get(h)
                             if db_col and db_col in row:
                                 val = row[db_col] or ""
-                                # Get current sheet value to avoid unnecessary updates
-                                current_sheet_val = sheet.cell(cell.row, i).value or ""
-                                
-                                if str(val) != str(current_sheet_val):
-                                    updates.append({
-                                        "range": f"{chr(64+i)}{cell.row}", 
-                                        "values": [[str(val)]]
-                                    })
+                                # We blindly update to save read quota on value checking
+                                # or you could cache values, but blind write is safer for quota
+                                updates.append({
+                                    "range": f"{chr(64+i)}{row_num}", 
+                                    "values": [[str(val)]]
+                                })
                         
-                        if updates:
-                            sheet.batch_update(updates)
-                            log(f"✅ DB→Sheet: Row {row_id} | {len(updates)} field(s) updated")
+                        synced_ids.append(row_id)
+                        log(f"✅ DB→Sheet: Staged update for Row {row_id}")
                     else:
                         log(f"⚠️ DB→Sheet: Row {row_id} not found in sheet")
-
-                    # Mark as synced so we don't pick it up again
-                    with engine.begin() as conn:
-                        conn.execute(
-                            text("UPDATE mytable SET sync_source = 'SYNCED' WHERE id = :id"), 
-                            {"id": row_id}
-                        )
+                        # You might want to handle 'create new row' here logic if needed
+                        # For now, mark as synced so we don't loop forever
+                        synced_ids.append(row_id) 
 
                 except Exception as row_error:
-                    log(f"❌ DB→Sheet Row {row_id} Error: {row_error}")
-                    # Mark as error to prevent infinite retries
-                    with engine.begin() as conn:
-                        conn.execute(
-                            text("UPDATE mytable SET sync_source = 'ERROR' WHERE id = :id"), 
-                            {"id": row_id}
-                        )
+                    log(f"❌ Error prepping row {row_id}: {row_error}")
+                    error_ids.append(row_id)
 
-            await asyncio.sleep(2) # [EDGE CASE] Rate Limits: Throttling requests
-            
+            # 3. Batch execute all updates to Sheet
+            if updates:
+                try:
+                    sheet.batch_update(updates)
+                    log(f"🚀 Batch updated {len(updates)} cells in Google Sheet")
+                except Exception as e:
+                    log(f"❌ Batch Update Failed: {e}")
+                    # If batch fails, we shouldn't mark rows as synced
+                    synced_ids = [] 
+
+            # 4. Mark rows as SYNCED in DB
+            if synced_ids:
+                with engine.begin() as conn:
+                    # Use a tuple for IN clause
+                    placeholders = ', '.join([':id' + str(i) for i in range(len(synced_ids))])
+                    params = {f'id{i}': bid for i, bid in enumerate(synced_ids)}
+                    conn.execute(
+                        text(f"UPDATE mytable SET sync_source = 'SYNCED' WHERE id IN ({placeholders})"),
+                        params
+                    )
+
+            if error_ids:
+                with engine.begin() as conn:
+                    placeholders = ', '.join([':id' + str(i) for i in range(len(error_ids))])
+                    params = {f'id{i}': bid for i, bid in enumerate(error_ids)}
+                    conn.execute(
+                        text(f"UPDATE mytable SET sync_source = 'ERROR' WHERE id IN ({placeholders})"),
+                        params
+                    )
+
+            await asyncio.sleep(2)
+
         except Exception as e:
             if "429" in str(e) or "quota" in str(e).lower():
                 log("⏳ Google Quota hit! Sleeping 60s...")
                 await asyncio.sleep(60)
             else:
-                log(f"❌ DB→Sheet Error: {e}")
+                log(f"❌ DB→Sheet Worker Error: {e}")
                 await asyncio.sleep(10)
 
 # ---------------- APP & ROUTES ---------------- #
