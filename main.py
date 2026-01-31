@@ -369,3 +369,41 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=int(os.getenv("PORT", 8000))
     )
+
+@app.post("/execute")
+async def execute_query(request: Request):
+    """Execute SQL query for testing (triggers DB→Sheet sync)"""
+    
+    try:
+        data = await request.json()
+        query = data.get("query", "").strip()
+        
+        if not query:
+            return {"error": "No query provided"}, 400
+        
+        # Security: Only allow UPDATE and SELECT
+        query_upper = query.upper().strip()
+        if not (query_upper.startswith("UPDATE") or query_upper.startswith("SELECT")):
+            return {"error": "Only UPDATE and SELECT queries allowed"}, 400
+        
+        # Execute query
+        with engine.begin() as conn:
+            result = conn.execute(text(query))
+            
+            if query_upper.startswith("SELECT"):
+                rows = result.fetchall()
+                log(f"🔍 Query: {len(rows)} rows")
+                return {
+                    "message": f"Found {len(rows)} rows",
+                    "rows": [dict(row._mapping) for row in rows]
+                }
+            else:
+                log(f"✏️ Query: {result.rowcount} rows updated")
+                return {
+                    "message": f"Updated {result.rowcount} rows. Check Sheet in ~3s.",
+                    "rows_affected": result.rowcount
+                }
+                
+    except Exception as e:
+        log(f"❌ Query error: {str(e)}")
+        return {"error": str(e)}, 500

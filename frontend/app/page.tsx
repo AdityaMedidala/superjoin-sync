@@ -1,28 +1,43 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 
-// --- TYPES ---
+// --- Types ---
 interface LogData {
   logs: string[];
 }
 
 interface StatsData {
-  queue_size: number;
-  logs_count: number;
+  queue: number;
+  logs: number;
 }
 
-// --- MAIN COMPONENT ---
+// --- Icons (Inline for portability) ---
+const Icons = {
+  Refresh: () => <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>,
+  Play: () => <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" /><path strokeLinecap="round" strokeLinejoin="round" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>,
+  Database: () => <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" /></svg>,
+  Link: () => <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>,
+  Check: () => <svg className="w-4 h-4 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>,
+  X: () => <svg className="w-4 h-4 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>,
+  ArrowRight: () => <svg className="w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M17 8l4 4m0 0l-4 4m4-4H3" /></svg>,
+};
+
 export default function Dashboard() {
+  // --- State ---
   const [logs, setLogs] = useState<string[]>([]);
   const [stats, setStats] = useState<StatsData | null>(null);
-  const [status, setStatus] = useState("🔴 Connecting...");
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const [testRunning, setTestRunning] = useState(false);
+  const [status, setStatus] = useState<"online" | "offline" | "connecting">("connecting");
+  const [sqlQuery, setSqlQuery] = useState("UPDATE mytable SET Name = 'Alice Johnson', Age = 28 WHERE id = 2;");
+  const [queryResult, setQueryResult] = useState<string>("");
+  const [isExecuting, setIsExecuting] = useState(false);
+  
+  // Ref for auto-scrolling logs
+const logsEndRef = useRef<HTMLTableRowElement>(null);
 
-  // Your Railway backend URL
-  const API = process.env.NEXT_PUBLIC_API_URL || "https://web-production-645c3.up.railway.app";
-  const SHEET_ID = process.env.NEXT_PUBLIC_SHEET_ID || "1bM61VLxcWdg3HaNgc2RkPLL-hm2S-BJ6Jo9lX4Qv1ks";
+  const API = "https://web-production-645c3.up.railway.app";
+  const SHEET_ID = "1bM61VLxcWdg3HaNgc2RkPLL-hm2S-BJ6Jo9lX4Qv1ks";
 
+  // --- Effects ---
   useEffect(() => {
     const fetchData = async () => {
       try {
@@ -31,18 +46,22 @@ export default function Dashboard() {
           fetch(`${API}/stats`)
         ]);
 
-        if (logsRes.ok) {
-          const logsData = await logsRes.json();
-          setLogs(logsData.logs || []);
-          setStatus("🟢 System Online");
-        }
-
-        if (statsRes.ok) {
-          const statsData = await statsRes.json();
+        if (logsRes.ok && statsRes.ok) {
+          const logsData: LogData = await logsRes.json();
+          const statsData: StatsData = await statsRes.json();
+          
+          // Only update if data actually changed to prevent render thrashing
+          setLogs(prev => {
+            const newLogs = logsData.logs || [];
+            return newLogs.length !== prev.length ? newLogs : prev;
+          });
           setStats(statsData);
+          setStatus("online");
+        } else {
+          setStatus("offline");
         }
-      } catch (error) {
-        setStatus("🔴 Backend Offline");
+      } catch {
+        setStatus("offline");
       }
     };
 
@@ -51,351 +70,329 @@ export default function Dashboard() {
     return () => clearInterval(interval);
   }, [API]);
 
-  // Manual test trigger
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const runTest = async (testType: string) => {
-    setTestRunning(true);
+  // Auto-scroll to bottom of logs
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [logs]);
+
+  // --- Handlers ---
+  const executeQuery = async () => {
+    if (!sqlQuery.trim()) return;
+    setIsExecuting(true);
+    setQueryResult("");
+    
     try {
-      await fetch(`${API}/test/${testType}`, { method: 'POST' });
+      const response = await fetch(`${API}/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: sqlQuery })
+      });
+      
+      const data = await response.json();
+      if (response.ok) {
+        setQueryResult(`SUCCESS: ${data.message || 'Query executed successfully'}`);
+      } else {
+        setQueryResult(`ERROR: ${data.error || 'Query failed'}`);
+      }
     } catch (error) {
-      console.error('Test failed:', error);
+      setQueryResult(`ERROR: Connection failed`);
+    } finally {
+      setIsExecuting(false);
     }
-    setTestRunning(false);
   };
 
-  const queueSize = stats?.queue_size || 0;
-  const isProcessing = queueSize > 0;
+  const queueSize = stats?.queue || 0;
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white">
-      {/* Header */}
-      <div className="border-b border-slate-700 bg-slate-900/50 backdrop-blur">
-        <div className="max-w-7xl mx-auto px-6 py-4">
-          <div className="flex items-center justify-between">
-            <div>
-              <h1 className="text-2xl font-bold bg-gradient-to-r from-blue-400 to-cyan-400 bg-clip-text text-transparent">
-                ⚡ Superjoin Sync Engine
-              </h1>
-              <p className="text-sm text-slate-400 mt-1">
-                Live 2-Way Sync • Google Sheets ↔️ MySQL
-              </p>
-            </div>
+    <div className="min-h-screen bg-gray-50 font-sans text-gray-900 selection:bg-orange-100 selection:text-orange-900">
+      
+      {/* --- Header --- */}
+      <nav className="sticky top-0 z-50 bg-white border-b border-gray-200">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="flex h-16 items-center justify-between">
+            {/* Brand */}
             <div className="flex items-center gap-3">
-              <StatusBadge status={status} />
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div className="max-w-7xl mx-auto px-6 py-8">
-        {/* Stats Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-          <StatCard
-            title="Queue Depth"
-            value={queueSize}
-            subtitle={isProcessing ? "Processing..." : "Idle"}
-            icon="📊"
-            color={isProcessing ? "blue" : "gray"}
-            pulse={isProcessing}
-          />
-          
-          <StatCard
-            title="Total Logs"
-            value={logs.length}
-            subtitle="Recent activity"
-            icon="📝"
-            color="purple"
-          />
-          
-          <StatCard
-            title="Sync Status"
-            value={status.includes("Online") ? "Active" : "Offline"}
-            subtitle="Real-time monitoring"
-            icon="🔄"
-            color={status.includes("Online") ? "green" : "red"}
-            pulse={status.includes("Online")}
-          />
-        </div>
-
-        {/* Test Controls */}
-        <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-6 mb-8">
-          <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
-            🧪 Test Controls
-          </h2>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <TestButton
-              onClick={() => window.open(`https://docs.google.com/spreadsheets/d/${SHEET_ID}/edit`, '_blank')}
-              disabled={false}
-              icon="📊"
-              title="Open Google Sheet"
-              description="Edit cells to test Sheet→DB"
-            />
-            
-            <TestButton
-              onClick={() => alert('Run this in MySQL:\n\nUPDATE mytable SET Name = "Test" WHERE id = 1;')}
-              disabled={false}
-              icon="🗄️"
-              title="Test DB→Sheet"
-              description="Copy SQL command"
-            />
-            
-            <TestButton
-              onClick={() => alert('Open Sheet in 5 tabs and edit different cells rapidly to test multiplayer mode!')}
-              disabled={false}
-              icon="👥"
-              title="Multiplayer Test"
-              description="Instructions for testing"
-            />
-          </div>
-        </div>
-
-        {/* Queue Visualizer */}
-        {isProcessing && (
-          <div className="bg-gradient-to-r from-blue-500/10 to-cyan-500/10 border border-blue-500/30 rounded-xl p-6 mb-8">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2">
-                <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></div>
-                <span className="font-semibold text-blue-400">
-                  Queue Processing
-                </span>
+              <div className="w-8 h-8 bg-orange-600 rounded flex items-center justify-center shadow-sm">
+                <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                </svg>
               </div>
-              <span className="text-sm text-slate-400">
-                {queueSize} items
-              </span>
-            </div>
-            <div className="w-full bg-slate-700 rounded-full h-2 overflow-hidden">
-              <div
-                className="bg-gradient-to-r from-blue-500 to-cyan-500 h-full transition-all duration-500 animate-pulse"
-                style={{
-                  width: `${Math.min((queueSize / 10) * 100, 100)}%`,
-                }}
-              ></div>
-            </div>
-          </div>
-        )}
-
-        {/* Live Logs */}
-        <div className="bg-slate-800/50 border border-slate-700 rounded-xl overflow-hidden">
-          <div className="p-6 border-b border-slate-700">
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-semibold flex items-center gap-2">
-                📡 Live Activity Feed
-              </h2>
-              <span className="text-sm text-slate-400">
-                Updates every 2s
-              </span>
-            </div>
-          </div>
-
-          <div className="p-4 bg-black/30 h-[500px] overflow-y-auto custom-scrollbar">
-            {logs.length === 0 ? (
-              <div className="flex flex-col items-center justify-center h-full text-slate-500">
-                <div className="text-4xl mb-4">👀</div>
-                <p className="text-center">
-                  Waiting for sync events...<br />
-                  <span className="text-sm">Edit a cell in Google Sheets to see activity</span>
-                </p>
+              <div>
+                <h1 className="text-lg font-bold tracking-tight text-gray-900 leading-none">SyncEngine</h1>
+                <p className="text-[10px] uppercase font-semibold text-gray-400 tracking-wider mt-0.5">Enterprise Dashboard</p>
               </div>
-            ) : (
+            </div>
+
+            {/* Right Actions */}
+            <div className="flex items-center gap-4">
+              <StatusIndicator status={status} />
+              <div className="h-6 w-px bg-gray-200 hidden sm:block"></div>
+              <a
+                href={`https://docs.google.com/spreadsheets/d/${SHEET_ID}/edit`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="hidden sm:inline-flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 hover:text-orange-600 transition-colors shadow-sm"
+              >
+                <span>Open Sheet</span>
+                <Icons.Link />
+              </a>
+            </div>
+          </div>
+        </div>
+      </nav>
+
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+        
+        {/* --- KPI Cards --- */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <StatCard 
+            label="Queue Depth" 
+            value={queueSize} 
+            subtext="Items processing"
+            active={queueSize > 0}
+          />
+          <StatCard 
+            label="Total Events" 
+            value={logs.length} 
+            subtext="Last 60 minutes"
+          />
+          <StatCard 
+            label="System Health" 
+            value={status === "online" ? "99.9%" : "Error"} 
+            subtext="Uptime status"
+            valueColor={status === "online" ? "text-green-600" : "text-red-600"}
+          />
+        </div>
+
+        {/* --- Main Content Grid --- */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          
+          {/* Left: Query Editor (4 cols) */}
+          <div className="lg:col-span-4 space-y-6">
+            <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
+              <div className="px-4 py-3 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Icons.Database />
+                  <span className="text-sm font-semibold text-gray-700">SQL Console</span>
+                </div>
+                <span className="text-xs text-gray-400 font-mono">PostgreSQL</span>
+              </div>
+              
+              <div className="p-4 space-y-4">
+                <div className="relative">
+                  <textarea
+                    value={sqlQuery}
+                    onChange={(e) => setSqlQuery(e.target.value)}
+                    className="w-full h-32 px-3 py-2 text-sm font-mono text-gray-800 bg-gray-50 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all resize-none placeholder-gray-400 leading-relaxed"
+                    spellCheck={false}
+                    placeholder="Enter SQL Query..."
+                  />
+                  {/* Subtle 'Update' badge if it's an update query */}
+                  {sqlQuery.toUpperCase().startsWith("UPDATE") && (
+                    <span className="absolute top-2 right-2 text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded border border-blue-100">
+                      WRITE OP
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex items-center justify-between gap-3">
+                  <button
+                    onClick={() => setSqlQuery("")}
+                    className="text-xs text-gray-400 hover:text-gray-600 font-medium px-2"
+                  >
+                    Clear
+                  </button>
+                  <button
+                    onClick={executeQuery}
+                    disabled={isExecuting || !sqlQuery.trim()}
+                    className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium text-white bg-orange-600 hover:bg-orange-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-md shadow-sm transition-all active:scale-[0.98]"
+                  >
+                    {isExecuting ? (
+                      <>
+                        <svg className="animate-spin h-4 w-4 text-white" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        <span>Running...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Icons.Play />
+                        <span>Run Query</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                {/* Result Area */}
+                {queryResult && (
+                  <div className={`mt-2 p-3 rounded-md text-xs font-mono border-l-4 ${
+                    queryResult.includes("SUCCESS") 
+                      ? "bg-green-50 border-green-500 text-green-800" 
+                      : "bg-red-50 border-red-500 text-red-800"
+                  }`}>
+                    {queryResult}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Quick Actions Panel */}
+            <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-4">
+              <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Debug Tools</h3>
               <div className="space-y-2">
-                {logs.map((log, i) => (
-                  <LogEntry key={i} log={log} />
-                ))}
+                <QuickActionButton 
+                  label="Update Row ID:1" 
+                  desc="Test single row sync"
+                  onClick={() => setSqlQuery("UPDATE mytable SET Age = Age + 1 WHERE id = 1;")} 
+                />
+                <QuickActionButton 
+                  label="Batch Update" 
+                  desc="Stress test with 5 rows"
+                  onClick={() => setSqlQuery("UPDATE mytable SET Age = Age + 1 WHERE id <= 5;")} 
+                />
               </div>
-            )}
+            </div>
           </div>
-        </div>
 
-        {/* How to Demo Section */}
-        <div className="mt-8 bg-slate-800/30 border border-slate-700 rounded-xl p-6">
-          <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
-            🎬 Demo Guide
-          </h3>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-            <DemoStep
-              number="1"
-              title="Test Sheet → DB"
-              description="Open Google Sheet and edit any cell. Watch this dashboard for the log entry."
-            />
-            <DemoStep
-              number="2"
-              title="Test DB → Sheet"
-              description="Run SQL: UPDATE mytable SET Name='Test' WHERE id=1; Check Sheet updates in ~3 seconds."
-            />
-            <DemoStep
-              number="3"
-              title="Test Multiplayer"
-              description="Open Sheet in 5 browser tabs. Edit different cells rapidly. Queue builds up, processes smoothly."
-            />
-            <DemoStep
-              number="4"
-              title="Test Deduplication"
-              description="Edit same cell twice with same value. Second edit is skipped (check logs)."
-            />
+          {/* Right: Activity Log (8 cols) */}
+          <div className="lg:col-span-8">
+            <div className="bg-white rounded-lg border border-gray-200 shadow-sm flex flex-col h-[600px]">
+              <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+                <div>
+                  <h2 className="text-base font-semibold text-gray-900">Activity Stream</h2>
+                  <p className="text-sm text-gray-500">Real-time database-to-sheet synchronization events</p>
+                </div>
+                <div className="flex items-center gap-2">
+                   <span className="flex h-2 w-2 relative">
+                      <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${status === 'online' ? 'bg-orange-400' : 'bg-gray-400'}`}></span>
+                      <span className={`relative inline-flex rounded-full h-2 w-2 ${status === 'online' ? 'bg-orange-500' : 'bg-gray-500'}`}></span>
+                    </span>
+                    <span className="text-xs font-medium text-gray-500">Live</span>
+                </div>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-0 scrollbar-thin scrollbar-thumb-gray-200 scrollbar-track-transparent">
+                {logs.length === 0 ? (
+                  <div className="h-full flex flex-col items-center justify-center text-center opacity-60">
+                    <div className="p-4 bg-gray-50 rounded-full mb-3">
+                       <Icons.Refresh />
+                    </div>
+                    <p className="text-sm text-gray-500">Waiting for events...</p>
+                  </div>
+                ) : (
+                  <table className="w-full text-left border-collapse">
+                    <thead className="bg-gray-50/50 sticky top-0 backdrop-blur-sm">
+                      <tr>
+                        <th className="px-6 py-2 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-20">Status</th>
+                        <th className="px-6 py-2 text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Message</th>
+                        <th className="px-6 py-2 text-[10px] font-semibold text-gray-500 uppercase tracking-wider text-right">Time</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-50">
+                      {logs.map((log, i) => (
+                        <LogEntry key={i} log={log} />
+                      ))}
+                      <tr ref={logsEndRef} />
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </div>
           </div>
-        </div>
 
-        {/* Footer */}
-        <div className="mt-8 text-center text-slate-500 text-sm">
-          <p>Built for Superjoin Assignment</p>
-          <p className="text-xs mt-1">
-            FastAPI • MySQL • Redis • Google Sheets API • Next.js
-          </p>
         </div>
-      </div>
-
-      {/* Scrollbar Styles */}
-      <style jsx global>{`
-        .custom-scrollbar::-webkit-scrollbar {
-          width: 6px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-track {
-          background: #1e293b;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb {
-          background: #475569;
-          border-radius: 3px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-          background: #64748b;
-        }
-      `}</style>
+      </main>
     </div>
   );
 }
 
-// --- SUB-COMPONENTS ---
+// --- Components ---
 
-interface StatusBadgeProps {
-  status: string;
-}
-
-function StatusBadge({ status }: StatusBadgeProps) {
-  const isOnline = status.includes("Online");
-  
+function StatCard({ label, value, subtext, active = false, valueColor = "text-gray-900" }: any) {
   return (
-    <div className={`flex items-center gap-2 px-4 py-2 rounded-full border ${
-      isOnline 
-        ? "bg-green-500/10 border-green-500/30 text-green-400" 
-        : "bg-red-500/10 border-red-500/30 text-red-400"
-    }`}>
-      <div className={`w-2 h-2 rounded-full ${
-        isOnline ? "bg-green-500 animate-pulse" : "bg-red-500"
-      }`}></div>
-      <span className="text-sm font-medium">
-        {isOnline ? "Online" : "Offline"}
-      </span>
+    <div className="bg-white p-5 rounded-lg border border-gray-200 shadow-sm flex flex-col justify-between hover:border-orange-200 transition-colors group">
+      <div className="flex justify-between items-start">
+        <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider">{label}</h3>
+        {active && <span className="h-2 w-2 rounded-full bg-orange-500 animate-pulse" />}
+      </div>
+      <div className="mt-2">
+        <div className={`text-2xl font-bold ${valueColor} group-hover:text-orange-600 transition-colors`}>{value}</div>
+        <p className="text-xs text-gray-400 mt-1">{subtext}</p>
+      </div>
     </div>
   );
 }
 
-// Fixed the "Element implicitly has 'any' type" error here
-// by defining strict keys for colors
-interface StatCardProps {
-  title: string;
-  value: string | number;
-  subtitle: string;
-  icon: string;
-  color: "blue" | "purple" | "green" | "red" | "gray";
-  pulse?: boolean;
-}
-
-function StatCard({ title, value, subtitle, icon, color, pulse }: StatCardProps) {
-  const colors: Record<string, string> = {
-    blue: "from-blue-500/20 to-blue-600/20 border-blue-500/30",
-    purple: "from-purple-500/20 to-purple-600/20 border-purple-500/30",
-    green: "from-green-500/20 to-green-600/20 border-green-500/30",
-    red: "from-red-500/20 to-red-600/20 border-red-500/30",
-    gray: "from-slate-500/20 to-slate-600/20 border-slate-500/30",
+function StatusIndicator({ status }: { status: string }) {
+  const styles = {
+    online: "bg-green-100 text-green-700 border-green-200",
+    offline: "bg-red-100 text-red-700 border-red-200",
+    connecting: "bg-yellow-100 text-yellow-700 border-yellow-200"
+  };
+  
+  const dots = {
+    online: "bg-green-500",
+    offline: "bg-red-500",
+    connecting: "bg-yellow-500"
   };
 
+  // @ts-ignore
+  const currentStyle = styles[status] || styles.offline;
+  // @ts-ignore
+  const currentDot = dots[status] || dots.offline;
+
   return (
-    <div className={`bg-gradient-to-br ${colors[color]} border rounded-xl p-6 ${pulse ? 'animate-pulse' : ''}`}>
-      <div className="flex items-center justify-between mb-3">
-        <span className="text-3xl">{icon}</span>
-      </div>
-      <div className="text-3xl font-bold mb-1">{value}</div>
-      <div className="text-sm text-slate-400 mb-1">{title}</div>
-      <div className="text-xs text-slate-500">{subtitle}</div>
+    <div className={`flex items-center gap-2 px-2.5 py-1 rounded-full border ${currentStyle}`}>
+      <span className={`w-1.5 h-1.5 rounded-full ${currentDot}`} />
+      <span className="text-xs font-semibold capitalize">{status}</span>
     </div>
   );
 }
 
-interface TestButtonProps {
-  onClick: () => void;
-  disabled: boolean;
-  icon: string;
-  title: string;
-  description: string;
-}
-
-function TestButton({ onClick, disabled, icon, title, description }: TestButtonProps) {
+function QuickActionButton({ label, desc, onClick }: any) {
   return (
-    <button
+    <button 
       onClick={onClick}
-      disabled={disabled}
-      className="flex flex-col items-start gap-2 p-4 rounded-lg bg-slate-700/50 border border-slate-600 hover:bg-slate-700 hover:border-slate-500 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+      className="w-full group flex items-center justify-between p-3 rounded-md bg-gray-50 hover:bg-white hover:shadow-md border border-transparent hover:border-orange-200 transition-all duration-200"
     >
-      <div className="text-2xl">{icon}</div>
       <div className="text-left">
-        <div className="font-semibold text-sm">{title}</div>
-        <div className="text-xs text-slate-400 mt-1">{description}</div>
+        <div className="text-sm font-medium text-gray-700 group-hover:text-orange-700">{label}</div>
+        <div className="text-[10px] text-gray-400">{desc}</div>
+      </div>
+      <div className="opacity-0 group-hover:opacity-100 transform translate-x-[-10px] group-hover:translate-x-0 transition-all duration-200">
+        <Icons.ArrowRight />
       </div>
     </button>
   );
 }
 
-interface LogEntryProps {
-  log: string;
-}
+function LogEntry({ log }: { log: string }) {
+  // Parsing logic to separate status icon from text
+  let statusType = "info";
+  if (log.includes("✅")) statusType = "success";
+  else if (log.includes("❌")) statusType = "error";
+  else if (log.includes("📥") || log.includes("⏭️")) statusType = "process";
+  else if (log.includes("⚠️")) statusType = "warning";
 
-function LogEntry({ log }: LogEntryProps) {
-  let icon = "•";
-  let colorClass = "text-slate-400";
-
-  if (log.includes("✅")) {
-    icon = "✅";
-    colorClass = "text-green-400";
-  } else if (log.includes("❌")) {
-    icon = "❌";
-    colorClass = "text-red-400";
-  } else if (log.includes("📥")) {
-    icon = "📥";
-    colorClass = "text-blue-400";
-  } else if (log.includes("⏭️")) {
-    icon = "⏭️";
-    colorClass = "text-slate-500";
-  } else if (log.includes("⚠️")) {
-    icon = "⚠️";
-    colorClass = "text-yellow-400";
-  }
+  const cleanLog = log.replace(/[✅❌📥📤⏭️⚠️🔵🔍✏️]/g, '').trim();
+  const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
   return (
-    <div className="flex gap-3 text-sm py-2 px-3 rounded hover:bg-slate-800/50 transition-colors">
-      <span className="flex-shrink-0 text-lg leading-none">{icon}</span>
-      <span className={`${colorClass} font-mono text-xs leading-relaxed`}>
-        {log}
-      </span>
-    </div>
-  );
-}
-
-interface DemoStepProps {
-  number: string;
-  title: string;
-  description: string;
-}
-
-function DemoStep({ number, title, description }: DemoStepProps) {
-  return (
-    <div className="flex gap-3 p-4 bg-slate-700/30 rounded-lg border border-slate-600">
-      <div className="flex-shrink-0 w-8 h-8 rounded-full bg-blue-500/20 border border-blue-500/30 flex items-center justify-center text-blue-400 font-bold">
-        {number}
-      </div>
-      <div>
-        <div className="font-semibold text-sm mb-1">{title}</div>
-        <div className="text-xs text-slate-400">{description}</div>
-      </div>
-    </div>
+    <tr className="hover:bg-gray-50/80 transition-colors group">
+      <td className="px-6 py-3 whitespace-nowrap">
+        {statusType === "success" && <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-50 text-green-700 border border-green-100">Success</span>}
+        {statusType === "error" && <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-50 text-red-700 border border-red-100">Error</span>}
+        {statusType === "process" && <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-50 text-blue-700 border border-blue-100">Sync</span>}
+        {statusType === "warning" && <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-50 text-yellow-700 border border-yellow-100">Info</span>}
+        {statusType === "info" && <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">Log</span>}
+      </td>
+      <td className="px-6 py-3 text-sm text-gray-700 font-mono">
+        {cleanLog}
+      </td>
+      <td className="px-6 py-3 text-xs text-gray-400 text-right whitespace-nowrap font-mono">
+        {time}
+      </td>
+    </tr>
   );
 }
